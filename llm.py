@@ -8,7 +8,9 @@ from langchain_core.runnables import RunnableParallel
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 
-from articles import main_articles
+import random
+
+from articles import main_articles, support_phrases
 from options.config import settings
 
 API_KEY = settings.API_KEY
@@ -33,7 +35,7 @@ llm = ChatOpenAI(
 knowledge_store = [
     Document(page_content=article) for article in main_articles
 ]
-retriever = BM25Retriever.from_documents(knowledge_store)
+retriever = BM25Retriever.from_documents(knowledge_store, k=settings.retriever_docs_number)
 
 
 def format_documents(documents: list[Document]):
@@ -65,11 +67,17 @@ prompt_no_rag = ChatPromptTemplate.from_messages([
 ])
 
 human_profile = {
-    'name': 'Оля',
-    'date_of_birth': '12.12.2000',
-    'description': 'За мужем, есть друзья и дети.'
+    'Имя': 'Оля',
+    "Пол": "",
+    'Дата рождения': '12.12.2000',
+    'Семейное положение': 'за мужем',
+    'Родители': 'да', # мама/папа
+    'Дети': 'да', # количество детей
+    'Друзья': 'да',
+    'Комментарий': 'За мужем, есть друзья и дети.'
 
 }
+
 # llm = ChatMistralAI(
 #     model="open-mistral-7b",
 #     temperature=0,
@@ -85,6 +93,21 @@ chain = RunnableParallel(
         context=(lambda x: x["question"]) | retriever | format_documents,        question=lambda x: x["question"],
         history=lambda x: x['history']
     ) | prompt | llm | StrOutputParser()
+
+def get_frase_from_llm(human_profile):
+    if settings.USE_LLM:
+        profile = ', '.join([f'{key} - {value}' for key, value in human_profile.items() if value is not None and value != ""])
+        question = "дай мне совет"
+        request = f'Данные обо мне: {profile}'
+        print(f'{request = }')
+        history = [HumanMessage(content=request)]
+        result = chain.invoke({"question": question, "history": history})
+        print(result)
+    else:
+        result = random.choice(support_phrases)
+
+    return result
+
 
 if __name__ == '__main__':
     profile = ', '.join([f'{key} - {value}' for key, value in human_profile.items()])
