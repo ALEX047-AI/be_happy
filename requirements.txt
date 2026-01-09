@@ -1,0 +1,6 @@
+rank_bm25
+#tkinter
+langchain
+langchain_openai
+langchain-community
+pydantic_settings
