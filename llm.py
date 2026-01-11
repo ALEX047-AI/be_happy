@@ -94,10 +94,9 @@ chain = RunnableParallel(
         history=lambda x: x['history']
     ) | prompt | llm | StrOutputParser()
 
-def get_frase_from_llm(human_profile):
+def get_frase_from_llm(human_profile, question = "дай мне совет"):
     if settings.USE_LLM:
         profile = ', '.join([f'{key} - {value}' for key, value in human_profile.items() if value is not None and value != ""])
-        question = "дай мне совет"
         request = f'Данные обо мне: {profile}'
         print(f'{request = }')
         history = [HumanMessage(content=request)]
@@ -108,6 +107,19 @@ def get_frase_from_llm(human_profile):
 
     return result
 
+def get_frase_from_llm_stream(human_profile, question = "дай мне совет"):
+    if settings.USE_LLM:
+        profile = ', '.join([f'{key} - {value}' for key, value in human_profile.items() if value is not None and value != ""])
+        request = f'Данные обо мне: {profile}'
+        print(f'{request = }')
+        history = [HumanMessage(content=request)]
+        for msg_chunk in chain.stream({"question": question, "history": history}):
+            print(msg_chunk, end='', flush=True)
+            yield msg_chunk
+    else:
+        yield random.choice(support_phrases)
+
+
 
 if __name__ == '__main__':
     profile = ', '.join([f'{key} - {value}' for key, value in human_profile.items()])
@@ -115,5 +127,7 @@ if __name__ == '__main__':
     request = f'Данные обо мне: {profile}'
     print(f'{request = }')
     history = [HumanMessage(content=request)]
-    result = chain.invoke({"question": question, "history": history})
-    print(result)
+    for msg_chunk in chain.stream({"question": question, "history": history}):
+        print(msg_chunk, end='', flush=True)
+    # result = chain.invoke({"question": question, "history": history})
+    # print(result)

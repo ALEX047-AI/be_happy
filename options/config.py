@@ -5,6 +5,10 @@ class Settings(BaseSettings):
     BASE_URL: str = ""
 
     USE_LLM: bool = True
+    USE_STREAM: bool = True
+
+    TD_CHAT_PREFIX: str = 'TD: '
+    USER_CHAT_PREFIX: str = 'Вы: '
 
     DATA: str = "data"
     profile_file_name: str = "user_profile.json"
