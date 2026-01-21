@@ -15,13 +15,13 @@ profile_fields = [
     "Семейное положение",
     "Родители",
     "Дети",
-    'Друзья',
+    "Друзья",
+    "Домашние животные",
     # "Принимаете ли медикаменты",
     # "Наблюдаетесь ли у врача",
     # "Хобби, интересы",
     "Комментарий",
 ]
-
 
 
 def load_profile():
@@ -49,6 +49,7 @@ def load_json(path, default):
             return json.load(f)
     except:
         return default
+
 
 def save_json(path, data):
     with open(path, "w", encoding="utf-8") as f:

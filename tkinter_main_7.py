@@ -16,7 +16,7 @@ from options.config import settings
 
 from articles import support_phrases
 from profile_manage import load_profile, save_profile, crisis_keywords, load_json, save_json
-from llm import get_frase_from_llm, get_frase_from_llm_stream
+from llm import LLM_IO  # get_frase_from_llm, get_frase_from_llm_stream
 
 from tkinter_diary import DiaryView
 
@@ -25,23 +25,32 @@ DATA = settings.DATA
 DIARY_PATH = os.path.join(DATA, settings.diary_file_name)
 os.makedirs(DATA, exist_ok=True)
 
-BG = settings.BG
-FG = settings.FG
-BTN = settings.BTN
-ACCENT = settings.ACCENT
-PANEL = settings.PANEL
 
 
 class TDApp(tk.Tk):
+
+    # BG = settings.BG
+    # FG = settings.FG
+    # ACTIVE_BG = settings.ACTIVE_BG
+    # LABEL_FG = settings.LABEL_FG
+    # BTN = settings.BTN
+    # ACCENT = settings.ACCENT
+    # PANEL = settings.PANEL
+
+    # FONT_SIZE = settings.FONT_SIZE
+    # FONT_NAME = settings.FONT_NAME
+
     def __init__(self):
         super().__init__()
 
-        self.title("TD — Treatment of Depression")
-        self.geometry("900x600")
-        self.configure(bg=BG)
+        self.title(settings.TITLE)
+        self.geometry(settings.GEOMETRY)
 
         self.profile = load_profile()
         self.diary = load_json(DIARY_PATH, [])
+
+        self.theme_renew(settings.THEMES_DEFAULT)
+        self.configure(bg=self.BG)
 
         self.create_layout()
 
@@ -50,30 +59,48 @@ class TDApp(tk.Tk):
         else:
             self.show_home()
 
+        self.llm_item = LLM_IO(self.profile, settings.MODEL_SOURCE)
+
+        self._active_stream = None  # для отмены предыдущего потока, если это нужно
+
+
+    def theme_renew(self, name=settings.THEMES_DEFAULT):
+
+        theme = settings.THEMES.get(name) or settings.THEMES[settings.THEMES_DEFAULT]
+
+        self.BG = theme.BG
+        self.FG = theme.FG
+        self.ACTIVE_BG = theme.ACTIVE_BG
+        self.LABEL_FG = theme.LABEL_FG
+        self.BTN = theme.BTN
+        self.ACCENT = theme.ACCENT
+        self.PANEL = theme.PANEL
+        self.FONT_SIZE = theme.FONT_SIZE
+        self.FONT_NAME = theme.FONT_NAME
+
     # ЗАПОЛНЕНИЕ ПРИЛОЖЕНИЯ
 
     def create_layout(self):
         self.create_menu()
 
-        self.container = tk.Frame(self, bg=BG)
+        self.container = tk.Frame(self, bg=self.BG)
         self.container.pack(fill="both", expand=True)
 
         self.frames = {}
         for name in ("home", "chat", "diary", "profile", "about"):
-            frame = tk.Frame(self.container, bg=BG)
+            frame = tk.Frame(self.container, bg=self.BG)
             frame.place(relx=0, rely=0, relwidth=1, relheight=1)
             self.frames[name] = frame
 
         self.build_home()
         self.build_chat()
 
-
         # Дневник
         self.diary_view = DiaryView(
             parent=self.frames["diary"],
             diary=self.diary,
             save_callback=lambda d: save_json(DIARY_PATH, d),
-            theme={"BG": BG, "FG": FG, "BTN": BTN, "ACCENT": ACCENT, "PANEL": PANEL},
+            theme={"BG": self.BG, "FG": self.FG, "BTN": self.BTN, "ACCENT": self.ACCENT, "PANEL": self.PANEL},
         )
 
         self.build_profile()
@@ -82,26 +109,109 @@ class TDApp(tk.Tk):
     def create_menu(self):
         menubar = tk.Menu(self)
 
-        # Top-level, non-nested items
-        menubar.add_command(label="Главная\t (Ctrl+H)", command=self.show_home)
-        menubar.add_command(label="Чат поддержки\t (Ctrl+C)", command=self.show_chat)
-        menubar.add_command(label="Дневник\t (Ctrl+D)", command=self.show_diary)
-        menubar.add_command(label="Профиль\t (Ctrl+P)", command=self.show_profile)
-        menubar.add_command(label="О проекте\t (Ctrl+A)", command=self.show_about)
-        menubar.add_command(label="Выход\t (Ctrl+E)", command=self.destroy)
+        # верхнее меню
+        menubar.add_command(label="Главная", underline=0, command=self.show_home)
+        menubar.add_command(label="Чат поддержки", underline=0, command=self.show_chat)
+        menubar.add_command(label="Дневник", underline=0, command=self.show_diary)
+        menubar.add_command(label="Профиль", underline=0, command=self.show_profile)
+        menubar.add_command(label="О проекте", underline=0, command=self.show_about)
+        menubar.add_command(label="Выход", underline=0, command=self.destroy)
+        # menubar.add_command(label="Черная", command=self.theme_renew)
 
         self.config(menu=menubar)
 
-        self.bind_all("<Control-h>", lambda e: self.show_home())
+        """ self.bind_all("<Control-Cyrillic_ghe>", lambda e: self.show_home())
+        self.bind_all("<Control-u>", lambda e: self.show_home())
         self.bind_all("<Control-c>", lambda e: self.show_chat())
         self.bind_all("<Control-d>", lambda e: self.show_diary())
         self.bind_all("<Control-p>", lambda e: self.show_profile())
         self.bind_all("<Control-a>", lambda e: self.show_about())
-        self.bind_all("<Control-e>", lambda e: self.destroy())
+        self.bind_all("<Control-e>", lambda e: self.destroy()) """
+
+        # self.bind_all("<KeyPress>", self.on_ctrl_shortcuts)
+        # self.bind_all("<KeyPress>", lambda e: print(e.keysym, repr(e.char), e.state))
+
+        # обработка горячих главиш
+        self.bind_all("<Control-KeyPress>", self.on_ctrl_shortcuts)
+
+    def on_ctrl_shortcuts(self, e):
+        if settings.DEBUG:
+            # печатает клавишу, котую мы нажимаем
+            print(e.keysym, repr(e.char), e.state)
+
+        # Ctrl+Буква. сделано так что все сочетания физической буквы обрабатываются
+        # и английские и русские и с капсом/шифтом
+        # U -> \x15, X -> \x18, L -> \x0c, P -> \x10, J -> \x0a, D -> \x04, Y -> \x19
+        actions = {
+            "\x15": self.show_home,    # Ctrl+U  ( Ctrl+Г )
+            "\x18": self.show_chat,    # Ctrl+X  ( Ctrl+Ч)
+            "\x0c": self.show_diary,   # Ctrl+L  ( Ctrl+Д)
+            "\x07": self.show_profile, # Ctrl+G  ( Ctrl+П)
+            "\x0a": self.show_about,   # Ctrl+J  ( Ctrl+О)
+            "\x04": self.destroy,      # Ctrl+D  ( Ctrl+В)
+            "\x19": self.show_home,    # Ctrl+Y  ( Ctrl+Н)  # для натроек
+        }
+
+        fn = actions.get(e.char)
+        if fn:
+            fn()
+            return "break"
+
+    """def on_ctrl_shortcuts(self, e):
+        ks = e.keysym
+
+        if ks in (
+            "Cyrillic_che", "Cyrillic_CHE", "x", "X",       # ч / Ч  (x / X)
+            "Cyrillic_ghe", "Cyrillic_GHE", "u", "U",       # г / Г  (u / U)
+            "Cyrillic_de",  "Cyrillic_DE",  "l", "L",       # д / Д  (l / L)
+            "Cyrillic_ze",  "Cyrillic_ZE",  "p", "P",       # з / З  (p / P)
+            "Cyrillic_o",   "Cyrillic_O",   "j", "J",       # о / О  (j / J)
+            "Cyrillic_ve",  "Cyrillic_VE",  "d", "D",       # в / В  (d / D)
+            "Cyrillic_en",  "Cyrillic_EN",  "y", "Y",       # н / Н  (y / Y)
+        ):
+            self.show_home()
+            return "break" """
 
     def raise_frame(self, name):
         self.frames[name].tkraise()
 
+    # вспомогательные функции для процесса стримминга текста в окнах приложения
+
+    def _cancel_stream(self):
+        self._active_stream = None
+
+    def _run_stream(self, gen, on_chunk, on_done, on_error, delay_ms=10):
+        # если вдруг еще один текст начинает печататься то текущий останавливаем
+        if gen is None or gen is not self._active_stream:
+            return
+
+        try:
+            chunk = next(gen)
+        except StopIteration:
+            self._active_stream = None
+            try:
+                on_done()
+            except Exception:
+                pass
+            return
+        except Exception as e:
+            self._active_stream = None
+            on_error(e)
+            return
+
+        try:
+            on_chunk(chunk)
+        except Exception as e:
+            self._active_stream = None
+            on_error(e)
+            return
+
+        self.after(delay_ms, lambda: self._run_stream(gen, on_chunk, on_done, on_error, delay_ms))
+
+    def start_stream(self, gen, on_chunk, on_done=lambda: None, on_error=lambda e: None, delay_ms=10):
+        self._cancel_stream()
+        self._active_stream = gen
+        self._run_stream(gen, on_chunk, on_done, on_error, delay_ms)
 
     # ГЛАВНАЯ СТРАНИЦА
 
@@ -109,7 +219,7 @@ class TDApp(tk.Tk):
         f = self.frames["home"]
 
         tk.Label(
-            f, text="Ты не один", fg=FG, bg=BG,
+            f, text=settings.MAIN_SLOGAN, fg=self.FG, bg=self.BG,
             font=("Arial", 22, "bold")
         ).pack(pady=30)
 
@@ -117,48 +227,51 @@ class TDApp(tk.Tk):
 
         tk.Label(
             f, textvariable=self.quote_var, wraplength=600,
-            fg=FG, bg=BG, font=("Arial", 14)
+            fg=self.FG, bg=self.BG, font=(self.FONT_NAME, self.FONT_SIZE)
         ).pack(pady=20)
-
-        def refresh_quote_no_stream():
-            if settings.USE_LLM:
-                try:
-                    self.quote_var.set(get_frase_from_llm(self.profile))
-                    return
-                except Exception:
-                    pass
-            self.quote_var.set(random.choice(support_phrases))
 
         def refresh_quote(stream=settings.USE_STREAM):
             if settings.USE_LLM:
                 try:
                     if not stream:
-                        self.quote_var.set(get_frase_from_llm(self.profile))
-                    else:
-                        stream_frase_from_llm = get_frase_from_llm_stream(self.profile)
-                        total_text = ''
-                        for chunk in stream_frase_from_llm:
-                            total_text += chunk
-                            self.quote_var.set(total_text)
-                            self.update_idletasks()
+                        self.quote_var.set(self.llm_item.get_frase_from_llm())
+                        return
+
+                    self.quote_var.set("")
+                    gen = self.llm_item.get_frase_from_llm_stream()
+
+                    total = {"text": ""}
+
+                    def on_chunk(chunk):
+                        total["text"] += chunk
+                        self.quote_var.set(total["text"])
+
+                    def on_done():
+                        pass
+
+                    def on_error(e):
+                        # ошибка fallback
+                        self.quote_var.set(random.choice(support_phrases))
+
+                    self.start_stream(gen, on_chunk, on_done, on_error)
                     return
                 except Exception:
                     pass
+
             self.quote_var.set(random.choice(support_phrases))
 
         tk.Button(
             f,
-            text="Случайная поддержка",
+            text=settings.MAIN_BTN_TEXT,
             command=refresh_quote,
-            bg=ACCENT, fg="white", relief="flat",
+            bg=self.ACCENT, fg="white", relief="flat",
             padx=10, pady=6
         ).pack(pady=10)
 
         tk.Label(
             f,
-            text="Это образовательное приложение. Если Вам нужна экстренная помощь —\n"
-                 "пожалуйста, обратитесь в местные службы поддержки или к близким.",
-            fg="#bbbbbb", bg=BG, font=("Arial", 10),
+            text=settings.MAIN_LABEL_TEXT,
+            fg=self.LABEL_FG, bg=self.BG, font=("Arial", 10),
             justify="center"
         ).pack(pady=40)
 
@@ -174,37 +287,72 @@ class TDApp(tk.Tk):
 
     # ЧАТ
 
+    def chat_set_intro(self):
+        self.append_chat(f"{settings.TD_CHAT_PREFIX}{settings.CHAT_INTRO_TEXT}")
+
+    def renew_chat(self, clean_llm_history=True):
+        self.chat_box.config(state="normal")
+        self.chat_box.delete("1.0", tk.END)
+        self.chat_set_intro()
+        self.chat_box.config(state="disabled")
+
+        if clean_llm_history and \
+            hasattr(self, "llm_item") and self.llm_item is not None:
+                self.llm_item.clear_history()
+
+
     def build_chat(self):
         f = self.frames["chat"]
 
         tk.Label(
-            f, text="Чат поддержки", fg=FG, bg=BG,
+            f, text="Чат поддержки", fg=self.FG, bg=self.BG,
             font=("Arial", 18, "bold")
         ).pack(pady=20)
 
         self.chat_box = tk.Text(
             f, height=20, width=80,
-            bg=PANEL, fg=FG, insertbackground=FG,
+            bg=self.PANEL, fg=self.FG, insertbackground=self.FG,
             relief="flat", wrap="word"
         )
         self.chat_box.pack(padx=20, pady=10)
+        self.chat_box.config(state="disabled")
 
         self.user_entry = tk.Entry(
             f, width=60,
-            bg=BTN, fg=FG, insertbackground=FG,
+            bg=self.BTN, fg=self.FG, insertbackground=self.FG,
             relief="flat"
         )
+
         self.user_entry.pack(pady=10)
         self.user_entry.bind("<Return>", lambda e: self.send_message())
 
-        tk.Button(
-            f, text="Отправить",
-            command=self.send_message,
-            bg=ACCENT, fg="white",
-            relief="flat", padx=10, pady=6
-        ).pack(pady=5)
+        # Делаем новый фрейм для кнопок
+        btn_row = tk.Frame(f, bg=self.BG)
+        btn_row.pack(pady=(0, 10), fill="x")
 
-        self.append_chat(f"{settings.TD_CHAT_PREFIX}Привет. Я могу выслушать Вас. Что сейчас на душе?\n")
+        tk.Label(btn_row, bg=self.BG, text="").pack(side="left", expand=True)
+
+        self.send_btn = tk.Button(
+            btn_row, text="Отправить",
+            command=self.send_message,
+            bg=self.ACCENT, fg="white",
+            relief="flat", padx=10, pady=6
+        )
+        self.send_btn.pack(side="left", padx=5)
+
+        self.clear_btn = tk.Button(
+            btn_row, text="Очистить чат",
+            command=self.renew_chat,
+            bg=self.ACCENT, fg="white",
+            relief="flat", padx=10, pady=6
+        )
+        self.clear_btn.pack(side="left", padx=5)
+
+        tk.Label(btn_row, bg=self.BG, text="").pack(side="left", expand=True)
+
+        self.chat_set_intro()
+
+        self.user_entry.focus_set()
 
     def send_message(self, stream=settings.USE_STREAM):
         msg = self.user_entry.get().strip()
@@ -218,19 +366,34 @@ class TDApp(tk.Tk):
         if settings.USE_LLM:
             try:
                 if not stream:
-                    response = get_frase_from_llm(self.profile, lower)
+                    response = self.llm_item.get_frase_from_llm(lower)
                     self.append_chat(f"\n{settings.TD_CHAT_PREFIX}{response}\n")
-                else:
-                    stream_frase_from_llm = get_frase_from_llm_stream(self.profile, lower)
-                    total_text = ''
-                    # self.append_chat(f"{settings.TD_CHAT_PREFIX}")
-                    for chunk in stream_frase_from_llm:
-                        if not total_text:
-                            chunk = f"\n{settings.TD_CHAT_PREFIX}{chunk.lstrip()}"
-                        total_text += chunk
-                        self.append_chat(chunk)
-                        self.update_idletasks()
-                    self.append_chat(f"\n")
+                    return
+
+                # тут получаем данные из ЛЛМ по кусочкам
+                gen = self.llm_item.get_frase_from_llm_stream(lower)
+
+                self.user_entry.configure(state="disabled")
+                self.send_btn.configure(state="disabled")
+
+                self.append_chat(f"\n{settings.TD_CHAT_PREFIX}")
+
+                def on_chunk(chunk):
+                    self.append_chat(chunk)
+
+                def on_done():
+                    self.append_chat("\n")
+                    self.user_entry.configure(state="normal")
+                    self.send_btn.configure(state="normal")
+                    self.user_entry.focus_set()
+
+                def on_error(e):
+                    self.append_chat(f"\n[Ошибка LLM: {e}]\n")
+                    self.user_entry.configure(state="normal")
+                    self.send_btn.configure(state="normal")
+                    self.user_entry.focus_set()
+
+                self.start_stream(gen, on_chunk, on_done, on_error)
                 return
             except Exception:
                 pass
@@ -242,7 +405,7 @@ class TDApp(tk.Tk):
                     "в твоей стране, или позвони близкому человеку.\n"
                     "Если можешь — скажи, где ты находишься (страна/город), и я подскажу, куда обратиться.\n"
                 )
-                self.append_chat(f"{settings.TD_CHAT_PREFIX}{response}\n")
+                self.append_chat(f"\n{settings.TD_CHAT_PREFIX}{response}\n")
                 return
 
             if "плохо" in lower or "тяжело" in lower or "груст" in lower:
@@ -257,11 +420,17 @@ class TDApp(tk.Tk):
             self.append_chat(f"{settings.TD_CHAT_PREFIX}{response}\n")
 
     def append_chat(self, text):
+        # if getattr(self, 'chat_box'):
+        self.chat_box.config(state="normal")
         self.chat_box.insert(tk.END, text)
         self.chat_box.see(tk.END)
+        self.chat_box.config(state="disabled")
 
     def show_chat(self):
         self.raise_frame("chat")
+        self.chat_box.config(state="disabled")
+        self.user_entry.focus_set()
+
 
     # ПРОФИЛЬ
 
@@ -269,7 +438,7 @@ class TDApp(tk.Tk):
         f = self.frames["profile"]
 
         tk.Label(
-            f, text="Профиль", fg=FG, bg=BG,
+            f, text="Профиль", fg=self.FG, bg=self.BG,
             font=("Arial", 18, "bold")
         ).pack(pady=20)
 
@@ -279,11 +448,11 @@ class TDApp(tk.Tk):
 
         RADIO_BTN = dict(
             indicatoron=0,
-            bg=BTN,
-            fg=FG,
-            activebackground="#2a2a2a",
-            activeforeground=FG,
-            selectcolor=ACCENT,
+            bg=self.BTN,
+            fg=self.FG,
+            activebackground=self.ACTIVE_BG,
+            activeforeground=self.FG,
+            selectcolor=self.ACCENT,
             relief="flat",
             padx=10,
             pady=6,
@@ -307,20 +476,21 @@ class TDApp(tk.Tk):
         self.children_var = tk.IntVar(value=max(0, min(10, children_default)))
 
         comment_default = str(self.profile.get("Комментарий", ""))
+        pets_default = str(self.profile.get("Домашние животные", ""))
 
-        form = tk.Frame(f, bg=BG)
+        form = tk.Frame(f, bg=self.BG)
         form.pack(pady=10)
 
         def label(row, text):
-            tk.Label(form, text=text + ":", fg=FG, bg=BG, anchor="w", width=25)\
+            tk.Label(form, text=text + ":", fg=self.FG, bg=self.BG, anchor="w", width=25)\
                 .grid(row=row, column=0, sticky="w", padx=5, pady=6)
 
         label(0, "Имя")
-        tk.Entry(form, textvariable=self.name_var, width=40, bg=BTN, fg=FG, insertbackground=FG, relief="flat")\
+        tk.Entry(form, textvariable=self.name_var, width=40, bg=self.BTN, fg=self.FG, insertbackground=self.FG, relief="flat")\
             .grid(row=0, column=1, sticky="w", padx=5, pady=6)
 
         label(1, "Пол")
-        gender_frame = tk.Frame(form, bg=BG)
+        gender_frame = tk.Frame(form, bg=self.BG)
         gender_frame.grid(row=1, column=1, sticky="w", padx=5, pady=6)
         tk.Radiobutton(gender_frame, text="Мужской", variable=self.gender_var, value="Мужской", **RADIO_BTN)\
             .pack(side="left", padx=(0, 10))
@@ -328,16 +498,16 @@ class TDApp(tk.Tk):
             .pack(side="left")
 
         label(2, "Дата рождения")
-        birth_frame = tk.Frame(form, bg=BG)
+        birth_frame = tk.Frame(form, bg=self.BG)
         birth_frame.grid(row=2, column=1, sticky="w", padx=5, pady=6)
-        tk.Entry(birth_frame, textvariable=self.birth_var, width=20, bg=BTN, fg=FG, insertbackground=FG, relief="flat")\
+        tk.Entry(birth_frame, textvariable=self.birth_var, width=20, bg=self.BTN, fg=self.FG, insertbackground=self.FG, relief="flat")\
             .pack(side="left", padx=(0, 10))
         tk.Button(birth_frame, text="Выбрать", command=self.open_birthdate_picker,
-                  bg=ACCENT, fg="white", relief="flat", padx=10, pady=4)\
+                  bg=self.ACCENT, fg="white", relief="flat", padx=10, pady=4)\
             .pack(side="left")
 
         label(3, "Семейное положение")
-        marital_frame = tk.Frame(form, bg=BG)
+        marital_frame = tk.Frame(form, bg=self.BG)
         marital_frame.grid(row=3, column=1, sticky="w", padx=5, pady=6)
         tk.Radiobutton(marital_frame, text="Холост / Не замужем", variable=self.marital_var,
                        value="Холост / Не замужем", **RADIO_BTN).pack(side="left", padx=(0, 10))
@@ -345,7 +515,7 @@ class TDApp(tk.Tk):
                        value="Женат / Замужем", **RADIO_BTN).pack(side="left")
 
         label(4, "Родители")
-        parents_frame = tk.Frame(form, bg=BG)
+        parents_frame = tk.Frame(form, bg=self.BG)
         parents_frame.grid(row=4, column=1, sticky="w", padx=5, pady=6)
         tk.Radiobutton(parents_frame, text="Да", variable=self.parents_var, value="Да", **RADIO_BTN)\
             .pack(side="left", padx=(0, 10))
@@ -354,23 +524,36 @@ class TDApp(tk.Tk):
 
         label(5, "Дети")
         tk.Spinbox(form, from_=0, to=10, textvariable=self.children_var,
-                   width=5, bg=BTN, fg=FG, insertbackground=FG, relief="flat", buttonbackground=BTN)\
+                   width=5, bg=self.BTN, fg=self.FG, insertbackground=self.FG, relief="flat", buttonbackground=self.BTN)\
             .grid(row=5, column=1, sticky="w", padx=5, pady=6)
 
         label(6, "Друзья")
-        friends_frame = tk.Frame(form, bg=BG)
+        friends_frame = tk.Frame(form, bg=self.BG)
         friends_frame.grid(row=6, column=1, sticky="w", padx=5, pady=6)
         tk.Radiobutton(friends_frame, text="Да", variable=self.friends_var, value="Да", **RADIO_BTN)\
             .pack(side="left", padx=(0, 10))
         tk.Radiobutton(friends_frame, text="Нет", variable=self.friends_var, value="Нет", **RADIO_BTN)\
             .pack(side="left")
 
-        label(7, "Комментарий")
-        comment_frame = tk.Frame(form, bg=BG)
-        comment_frame.grid(row=7, column=1, sticky="w", padx=5, pady=6)
+        label(7, "Домашние животные")
+        pets_frame = tk.Frame(form, bg=self.BG)
+        pets_frame.grid(row=7, column=1, sticky="w", padx=5, pady=6)
 
-        self.comment_text = tk.Text(comment_frame, width=40, height=5, bg=PANEL, fg=FG,
-                                    insertbackground=FG, relief="flat", wrap="word")
+        self.pets_text = tk.Text(
+            pets_frame, width=40, height=5, bg=self.PANEL, fg=self.FG,
+            insertbackground=self.FG, relief="flat", wrap="word"
+        )
+        self.pets_text.pack(side="left")
+        self.pets_text.insert("1.0", pets_default)
+
+        label(8, "Комментарий")
+        comment_frame = tk.Frame(form, bg=self.BG)
+        comment_frame.grid(row=8, column=1, sticky="w", padx=5, pady=6)
+
+        self.comment_text = tk.Text(
+            comment_frame, width=40, height=5, bg=self.PANEL, fg=self.FG,
+            insertbackground=self.FG, relief="flat", wrap="word"
+        )
         self.comment_text.pack(side="left")
         self.comment_text.insert("1.0", comment_default)
 
@@ -381,14 +564,14 @@ class TDApp(tk.Tk):
         tk.Button(
             f, text="Сохранить профиль",
             command=self.save_profile_data,
-            bg=ACCENT, fg="white", relief="flat",
+            bg=self.ACCENT, fg="white", relief="flat",
             padx=10, pady=6
         ).pack(pady=20)
 
     def open_birthdate_picker(self):
         top = tk.Toplevel(self)
         top.title("Выбор даты рождения")
-        top.configure(bg=BG)
+        top.configure(bg=self.BG)
         top.resizable(False, False)
         top.grab_set()
 
@@ -411,24 +594,24 @@ class TDApp(tk.Tk):
         m = max(1, min(12, m))
         d = max(1, min(31, d))
 
-        tk.Label(top, text="Год:", fg=FG, bg=BG).grid(row=0, column=0, padx=10, pady=10, sticky="e")
-        tk.Label(top, text="Месяц:", fg=FG, bg=BG).grid(row=1, column=0, padx=10, pady=10, sticky="e")
-        tk.Label(top, text="День:", fg=FG, bg=BG).grid(row=2, column=0, padx=10, pady=10, sticky="e")
+        tk.Label(top, text="Год:", fg=self.FG, bg=self.BG).grid(row=0, column=0, padx=10, pady=10, sticky="e")
+        tk.Label(top, text="Месяц:", fg=self.FG, bg=self.BG).grid(row=1, column=0, padx=10, pady=10, sticky="e")
+        tk.Label(top, text="День:", fg=self.FG, bg=self.BG).grid(row=2, column=0, padx=10, pady=10, sticky="e")
 
         year_var = tk.IntVar(value=y)
         month_var = tk.IntVar(value=m)
         day_var = tk.IntVar(value=d)
 
         tk.Spinbox(top, from_=year_min, to=year_max, textvariable=year_var, width=8,
-                   bg=BTN, fg=FG, insertbackground=FG, relief="flat")\
+                   bg=self.BTN, fg=self.FG, insertbackground=self.FG, relief="flat")\
             .grid(row=0, column=1, padx=10, pady=10, sticky="w")
 
         tk.Spinbox(top, from_=1, to=12, textvariable=month_var, width=8,
-                   bg=BTN, fg=FG, insertbackground=FG, relief="flat")\
+                   bg=self.BTN, fg=self.FG, insertbackground=self.FG, relief="flat")\
             .grid(row=1, column=1, padx=10, pady=10, sticky="w")
 
         tk.Spinbox(top, from_=1, to=31, textvariable=day_var, width=8,
-                   bg=BTN, fg=FG, insertbackground=FG, relief="flat")\
+                   bg=self.BTN, fg=self.FG, insertbackground=self.FG, relief="flat")\
             .grid(row=2, column=1, padx=10, pady=10, sticky="w")
 
         def is_valid_date(yy, mm, dd):
@@ -450,12 +633,12 @@ class TDApp(tk.Tk):
             self.birth_var.set(f"{yy:04d}-{mm:02d}-{dd:02d}")
             top.destroy()
 
-        btns = tk.Frame(top, bg=BG)
+        btns = tk.Frame(top, bg=self.BG)
         btns.grid(row=3, column=0, columnspan=2, pady=(5, 12))
 
-        tk.Button(btns, text="OK", command=set_date, bg=ACCENT, fg="white", relief="flat", padx=14, pady=6)\
+        tk.Button(btns, text="OK", command=set_date, bg=self.ACCENT, fg="white", relief="flat", padx=14, pady=6)\
             .pack(side="left", padx=8)
-        tk.Button(btns, text="Отмена", command=top.destroy, bg=BTN, fg=FG, relief="flat", padx=14, pady=6)\
+        tk.Button(btns, text="Отмена", command=top.destroy, bg=self.BTN, fg=self.FG, relief="flat", padx=14, pady=6)\
             .pack(side="left", padx=8)
 
     def save_profile_data(self):
@@ -467,11 +650,21 @@ class TDApp(tk.Tk):
             "Родители": self.parents_var.get().strip(),
             "Дети": max(0, min(10, int(self.children_var.get()))),
             "Друзья": self.friends_var.get().strip(),
+            "Домашние животные": self.pets_text.get("1.0", "end").strip(),
             "Комментарий": self.comment_text.get("1.0", "end").strip(),
         }
 
+        self.renew_chat(clean_llm_history=False)
+
         if save_profile(data):
             self.profile = data
+
+            # Обновляем LLM profile без потери данных профиля
+            # И очищаем историю
+            if hasattr(self, "llm_item") and self.llm_item is not None:
+                self.llm_item.update_profile(self.profile)
+                self.llm_item.clear_history()
+
             messagebox.showinfo("Сохранено", "Профиль сохранён.")
             self.show_home()
         else:
@@ -486,7 +679,7 @@ class TDApp(tk.Tk):
         f = self.frames["about"]
 
         tk.Label(
-            f, text="О проекте", fg=FG, bg=BG,
+            f, text="О проекте", fg=self.FG, bg=self.BG,
             font=("Arial", 18, "bold")
         ).pack(pady=20)
 
@@ -497,12 +690,13 @@ class TDApp(tk.Tk):
             "- Если тебе нужна экстренная помощь — обратись к специалистам или в службы помощи.\n\n"
             "Функции:\n"
             "- Слова поддержки\n"
-            "- Простой чат\n"
-            "- Дневник\n"
-            "- Профиль\n"
+            "- Чат с использованием генративной модели\n"
+            "- Дневник самочувствия\n"
+            "- Профиль пользователя\n"
+            "- поддерживаются горячие клавиши. Ctrl + первая буква пункта меню"
         )
 
-        tk.Label(f, text=text, fg=FG, bg=BG, wraplength=600).pack(padx=20, pady=40)
+        tk.Label(f, text=text, fg=self.FG, bg=self.BG, wraplength=600).pack(padx=20, pady=40)
 
     def show_about(self):
         self.raise_frame("about")
