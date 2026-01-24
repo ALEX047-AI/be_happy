@@ -16,10 +16,10 @@ from tkinter import filedialog
 from queue import Queue
 from dataclasses import dataclass
 
-from options.config import settings
+from options.config import settings, TTS_VOICES, city_list
 
 from articles import support_phrases
-from profile_manage import load_profile, save_profile, crisis_keywords, load_json, save_json, xlsx_to_list, dict_to_xlsx
+from profile_manage import load_profile, save_profile, crisis_keywords, load_json, save_json, sheet_to_list, dict_to_sheet
 from llm import LLM_IO  # get_frase_from_llm, get_frase_from_llm_stream
 from speech_service import SpeechPlayer, TTS_Stream
 from tkinter_diary import DiaryView
@@ -53,7 +53,7 @@ class TDApp(tk.Tk):
         self.profile = load_profile()
         self.diary = load_json(DIARY_PATH, [])
 
-        self.theme_renew(settings.THEMES_DEFAULT)
+        self.theme_renew(settings.app_options.THEME)
         self.configure(bg=self.BG)
 
         self.create_layout()
@@ -70,11 +70,12 @@ class TDApp(tk.Tk):
         self.tts_stream = None
         self.llm_item = None
 
-        if settings.USE_SPEECH:
+        if settings.app_options.USE_TTS:
             self.player = SpeechPlayer(q_in=self.q_speech, finished_item=True, daemon=True)
             self.player.start()
 
             self.tts_stream = TTS_Stream(q_in=self.q_text, q_out=self.q_speech, daemon=True,
+                                voice=settings.tts_voice,
                                 finished_item=True, save_to_disk=False,
                                 sample_rate=24000, channels=1
                     )
@@ -115,9 +116,9 @@ class TDApp(tk.Tk):
             # self.player.resume()
 
 
-    def theme_renew(self, name=settings.THEMES_DEFAULT):
+    def theme_renew(self, name=settings.app_options.THEME):
 
-        theme = settings.THEMES.get(name) or settings.THEMES[settings.THEMES_DEFAULT]
+        theme = settings.THEMES.get(name) or settings.THEMES[settings.THEMES_DEFAULT] or settings.THEMES['black']
 
         self.BG = theme.BG
         self.FG = theme.FG
@@ -138,7 +139,7 @@ class TDApp(tk.Tk):
         self.container.pack(fill="both", expand=True)
 
         self.frames = {}
-        for name in ("home", "chat", "diary", "profile", "about"):
+        for name in ("home", "chat", "diary", "profile", "options", "about"):
             frame = tk.Frame(self.container, bg=self.BG)
             frame.place(relx=0, rely=0, relwidth=1, relheight=1)
             self.frames[name] = frame
@@ -201,12 +202,14 @@ class TDApp(tk.Tk):
             initialfile = f'Дневник {self.profile.get("Имя", "Пользователя")}'
 
         path = filedialog.asksaveasfilename(
-            title="Экспорт дневника (json или xlsx)",
+            title="Экспорт дневника (ods csv xlsx json)",
             defaultextension=".json",
             initialfile=initialfile,
             filetypes=[
+                ("OpenDocument", "*.ods"),
+                ("Excel", "*.xlsx"),
+                ("CSV", "*.csv"),
                 ("JSON", "*.json"),
-                ("Excel (XLSX)", "*.xlsx"),
             ],
         )
         if not path:
@@ -217,10 +220,10 @@ class TDApp(tk.Tk):
         try:
             if ext == ".json":
                 save_json(path, self.diary)
-            elif ext == ".xlsx":
-                dict_to_xlsx(self.diary, path)
+            elif ext in (".xlsx", ".ods", ".csv"):
+                dict_to_sheet(self.diary, path, format=ext)
             else:
-                messagebox.showerror("Ошибка", "Выберите .json или .xlsx")
+                messagebox.showerror("Ошибка", "Выберите .json .xlsx .ods .csv")
                 return
 
             messagebox.showinfo("OK", "Дневник экспортирован.")
@@ -292,10 +295,9 @@ class TDApp(tk.Tk):
 
     def import_diary(self):
         path = filedialog.askopenfilename(
-            title="Импорт дневника (json, xlsx)",
+            title="Импорт дневника (ods csv xlsx json)",
             filetypes=[
-                ("JSON", "*.json"),
-                ("Excel (XLSX)", "*.xlsx"),
+                ("Тип файла:", ['*.ods', '*.csv', '*.xlsx', "*.json"])
             ],
         )
         if not path:
@@ -308,10 +310,10 @@ class TDApp(tk.Tk):
                 data = load_json(path, [])
                 if not isinstance(data, list):
                     raise ValueError("Файл дневника должен содержать JSON-массив (list).")
-            elif ext == ".xlsx":
-                data = xlsx_to_list(path)
+            elif ext in (".xlsx", ".ods", ".csv"):
+                data = sheet_to_list(path, format=ext)
                 if not isinstance(data, list):
-                    raise ValueError("XLSX должен быть преобразован в list[dict].")
+                    raise ValueError("Файл должен быть преобразован в list[dict].")
             else:
                 messagebox.showerror("Ошибка", "Выберите .json или .xlsx")
                 return
@@ -347,9 +349,9 @@ class TDApp(tk.Tk):
         menubar.add_command(label="Чат поддержки", underline=0, command=self.show_chat)
         menubar.add_command(label="Дневник", underline=0, command=self.show_diary)
         menubar.add_command(label="Профиль", underline=0, command=self.show_profile)
+        menubar.add_command(label="Настройки", underline=0, command=self.show_options)
         menubar.add_command(label="О проекте", underline=0, command=self.show_about)
-        # menubar.add_command(label="Черная", command=self.theme_renew)
-
+        
         self.config(menu=menubar)
 
         """ self.bind_all("<Control-Cyrillic_ghe>", lambda e: self.show_home())
@@ -363,7 +365,7 @@ class TDApp(tk.Tk):
         # self.bind_all("<KeyPress>", self.on_ctrl_shortcuts)
         # self.bind_all("<KeyPress>", lambda e: print(e.keysym, repr(e.char), e.state))
 
-        # обработка горячих клавиш
+        # обработка горячих главиш
         self.bind_all("<Control-KeyPress>", self.on_ctrl_shortcuts)
 
     def on_ctrl_shortcuts(self, e):
@@ -381,7 +383,7 @@ class TDApp(tk.Tk):
             "\x07": self.show_profile, # Ctrl+G  ( Ctrl+П)
             "\x0a": self.show_about,   # Ctrl+J  ( Ctrl+О)
             "\x04": self.destroy,      # Ctrl+D  ( Ctrl+В)
-            "\x19": self.show_home,    # Ctrl+Y  ( Ctrl+Н)  # для натроек
+            "\x19": self.show_options, # Ctrl+Y  ( Ctrl+Н) 
         }
 
         fn = actions.get(e.char)
@@ -562,7 +564,7 @@ class TDApp(tk.Tk):
         self.user_entry.pack(pady=10)
         self.user_entry.bind("<Return>", lambda e: self.send_message())
 
-        # Всплывающая подсказка к кнопке
+        # Делаем новый фрейм для кнопок
         btn_row = tk.Frame(f, bg=self.BG)
         btn_row.pack(pady=(0, 10), fill="x")
 
@@ -611,8 +613,8 @@ class TDApp(tk.Tk):
             relief="flat", padx=10, pady=6
         )
         self.stop_btn.pack(side="left", padx=5)
-        # о всплывающую подсказку к кнопке
-        Hovertip(self.stop_btn, 'Проджит воспроизведение только после нового ответа', hover_delay=500)
+        # Добавить всплывающую подсказку к кнопке
+        Hovertip(self.stop_btn, 'Продолжит воспроизведение только после нового ответа', hover_delay=500)
 
 
         tk.Label(btn_row, bg=self.BG, text="").pack(side="left", expand=True)
@@ -735,6 +737,7 @@ class TDApp(tk.Tk):
 
         self.name_var = tk.StringVar(value=str(self.profile.get("Имя", "")))
         self.gender_var = tk.StringVar(value=normalize(self.profile.get("Пол", ""), ("Мужской", "Женский")))
+        self.city_var = tk.StringVar(value=normalize(self.profile.get("Город", ""), tuple(city_list)))
         self.birth_var = tk.StringVar(value=str(self.profile.get("Дата рождения", "")))
         self.marital_var = tk.StringVar(
             value=normalize(self.profile.get("Семейное положение", ""), ("Холост / Не замужем", "Женат / Замужем"))
@@ -750,6 +753,7 @@ class TDApp(tk.Tk):
 
         comment_default = str(self.profile.get("Комментарий", ""))
         pets_default = str(self.profile.get("Домашние животные", ""))
+        hobby_default = str(self.profile.get("Хобби, интересы", ""))
 
         form = tk.Frame(f, bg=self.BG)
         form.pack(pady=10)
@@ -770,47 +774,64 @@ class TDApp(tk.Tk):
         tk.Radiobutton(gender_frame, text="Женский", variable=self.gender_var, value="Женский", **RADIO_BTN)\
             .pack(side="left")
 
-        label(2, "Дата рождения")
+        label(2, "Город")
+        city_frame = tk.Frame(form, bg=self.BG)
+        city_frame.grid(row=2, column=1, sticky="w", padx=5, pady=6)
+
+        # выподающий список городов список городов
+        self.city_menu = tk.OptionMenu(city_frame, self.city_var, *city_list)
+        self.city_menu.config(
+            bg=self.BTN, fg=self.FG, activebackground=self.ACTIVE_BG, activeforeground=self.FG,
+            relief="flat", highlightthickness=0, padx=8, pady=4
+        )
+        # настройка выпадающего меню (внутренний Menu)
+        self.city_menu["menu"].config(
+            bg=self.BTN, fg=self.FG, activebackground=self.ACTIVE_BG, activeforeground=self.FG,
+            relief="flat", borderwidth=0
+        )
+        self.city_menu.pack(side="left")
+
+        label(3, "Дата рождения")
         birth_frame = tk.Frame(form, bg=self.BG)
-        birth_frame.grid(row=2, column=1, sticky="w", padx=5, pady=6)
+        birth_frame.grid(row=3, column=1, sticky="w", padx=5, pady=6)
         tk.Entry(birth_frame, textvariable=self.birth_var, width=20, bg=self.BTN, fg=self.FG, insertbackground=self.FG, relief="flat")\
             .pack(side="left", padx=(0, 10))
         tk.Button(birth_frame, text="Выбрать", command=self.open_birthdate_picker,
                   bg=self.ACCENT, fg="white", relief="flat", padx=10, pady=4)\
             .pack(side="left")
 
-        label(3, "Семейное положение")
+        label(4, "Семейное положение")
         marital_frame = tk.Frame(form, bg=self.BG)
-        marital_frame.grid(row=3, column=1, sticky="w", padx=5, pady=6)
+        marital_frame.grid(row=4, column=1, sticky="w", padx=5, pady=6)
         tk.Radiobutton(marital_frame, text="Холост / Не замужем", variable=self.marital_var,
                        value="Холост / Не замужем", **RADIO_BTN).pack(side="left", padx=(0, 10))
         tk.Radiobutton(marital_frame, text="Женат / Замужем", variable=self.marital_var,
                        value="Женат / Замужем", **RADIO_BTN).pack(side="left")
 
-        label(4, "Родители")
+        label(5, "Родители")
         parents_frame = tk.Frame(form, bg=self.BG)
-        parents_frame.grid(row=4, column=1, sticky="w", padx=5, pady=6)
+        parents_frame.grid(row=5, column=1, sticky="w", padx=5, pady=6)
         tk.Radiobutton(parents_frame, text="Да", variable=self.parents_var, value="Да", **RADIO_BTN)\
             .pack(side="left", padx=(0, 10))
         tk.Radiobutton(parents_frame, text="Нет", variable=self.parents_var, value="Нет", **RADIO_BTN)\
             .pack(side="left")
 
-        label(5, "Дети")
+        label(6, "Дети")
         tk.Spinbox(form, from_=0, to=10, textvariable=self.children_var,
                    width=5, bg=self.BTN, fg=self.FG, insertbackground=self.FG, relief="flat", buttonbackground=self.BTN)\
-            .grid(row=5, column=1, sticky="w", padx=5, pady=6)
+            .grid(row=6, column=1, sticky="w", padx=5, pady=6)
 
-        label(6, "Друзья")
+        label(7, "Друзья")
         friends_frame = tk.Frame(form, bg=self.BG)
-        friends_frame.grid(row=6, column=1, sticky="w", padx=5, pady=6)
+        friends_frame.grid(row=7, column=1, sticky="w", padx=5, pady=6)
         tk.Radiobutton(friends_frame, text="Да", variable=self.friends_var, value="Да", **RADIO_BTN)\
             .pack(side="left", padx=(0, 10))
         tk.Radiobutton(friends_frame, text="Нет", variable=self.friends_var, value="Нет", **RADIO_BTN)\
             .pack(side="left")
 
-        label(7, "Домашние животные")
+        label(8, "Домашние животные")
         pets_frame = tk.Frame(form, bg=self.BG)
-        pets_frame.grid(row=7, column=1, sticky="w", padx=5, pady=6)
+        pets_frame.grid(row=8, column=1, sticky="w", padx=5, pady=6)
 
         self.pets_text = tk.Text(
             pets_frame, width=40, height=5, bg=self.PANEL, fg=self.FG,
@@ -819,9 +840,24 @@ class TDApp(tk.Tk):
         self.pets_text.pack(side="left")
         self.pets_text.insert("1.0", pets_default)
 
-        label(8, "Комментарий")
+        label(9, "Хобби, интересы")
+        hobby_frame = tk.Frame(form, bg=self.BG)
+        hobby_frame.grid(row=9, column=1, sticky="w", padx=5, pady=6)
+
+        self.hobby_text = tk.Text(
+            hobby_frame, width=40, height=5, bg=self.PANEL, fg=self.FG,
+            insertbackground=self.FG, relief="flat", wrap="word"
+        )
+        self.hobby_text.pack(side="left")
+        self.hobby_text.insert("1.0", hobby_default)
+
+        hobby_scroll = tk.Scrollbar(hobby_frame, command=self.hobby_text.yview)
+        hobby_scroll.pack(side="left", fill="y", padx=(6, 0))
+        self.hobby_text.configure(yscrollcommand=hobby_scroll.set)
+
+        label(10, "Комментарий")
         comment_frame = tk.Frame(form, bg=self.BG)
-        comment_frame.grid(row=8, column=1, sticky="w", padx=5, pady=6)
+        comment_frame.grid(row=10, column=1, sticky="w", padx=5, pady=6)
 
         self.comment_text = tk.Text(
             comment_frame, width=40, height=5, bg=self.PANEL, fg=self.FG,
@@ -918,12 +954,14 @@ class TDApp(tk.Tk):
         data = {
             "Имя": self.name_var.get().strip(),
             "Пол": self.gender_var.get().strip(),
+            "Город": self.city_var.get().strip(),
             "Дата рождения": self.birth_var.get().strip(),
             "Семейное положение": self.marital_var.get().strip(),
             "Родители": self.parents_var.get().strip(),
             "Дети": max(0, min(10, int(self.children_var.get()))),
             "Друзья": self.friends_var.get().strip(),
             "Домашние животные": self.pets_text.get("1.0", "end").strip(),
+            "Хобби, интересы": self.hobby_text.get("1.0", "end").strip(),
             "Комментарий": self.comment_text.get("1.0", "end").strip(),
         }
 
@@ -952,8 +990,10 @@ class TDApp(tk.Tk):
             value = (value or "").strip()
             return value if value in allowed else ""
 
+
         self.name_var.set(str(self.profile.get("Имя", "")))
         self.gender_var.set(normalize(self.profile.get("Пол", ""), ("Мужской", "Женский")))
+        self.city_var.set(normalize(self.profile.get("Город", ""), tuple(city_list)))
         self.birth_var.set(str(self.profile.get("Дата рождения", "")))
         self.marital_var.set(normalize(
             self.profile.get("Семейное положение", ""),
@@ -969,15 +1009,184 @@ class TDApp(tk.Tk):
         self.children_var.set(max(0, min(10, children_default)))
 
         pets_default = str(self.profile.get("Домашние животные", ""))
+        hobby_default = str(self.profile.get("Хобби, интересы", ""))
         comment_default = str(self.profile.get("Комментарий", ""))
 
         if hasattr(self, "pets_text"):
             self.pets_text.delete("1.0", "end")
             self.pets_text.insert("1.0", pets_default)
 
+        if hasattr(self, "hobby_text"):
+            self.hobby_text.delete("1.0", "end")
+            self.hobby_text.insert("1.0", hobby_default)
+
         if hasattr(self, "comment_text"):
             self.comment_text.delete("1.0", "end")
             self.comment_text.insert("1.0", comment_default)
+
+
+    # НАСТРОЙКИ
+
+    def build_options(self):
+        f = self.frames["options"]
+        #self.frames["options"] = tk.Frame(parent_container, bg=self.BG)
+
+        tk.Label(
+            f, text="Настройки", fg=self.FG, bg=self.BG,
+            font=("Arial", 18, "bold")
+        ).pack(pady=20)
+
+        def normalize(value: str, allowed: tuple[str, ...]) -> str:
+            value = (value or "").strip()
+            return value if value in allowed else ""
+
+        # варианты выбора из
+        theme_list = tuple(settings.THEMES.keys())
+        voice_list = tuple(TTS_VOICES.keys())
+
+        # если вдруг списки пустые — не падаем
+        if not theme_list:
+            theme_list = ("white",)
+        if not voice_list:
+            voice_list = ("Наталья",)
+
+        # значения по умолчанию
+        opt = settings.app_options
+
+        self.opt_use_asr_var = tk.BooleanVar(value=bool(getattr(opt, "USE_TTS", True)))
+        self.opt_theme_var = tk.StringVar(value=normalize(getattr(opt, "THEME", "white"), theme_list))
+        self.opt_voice_var = tk.StringVar(value=normalize(getattr(opt, "TTS_VOICE", "Наталья"), voice_list))
+
+        form = tk.Frame(f, bg=self.BG)
+        form.pack(pady=10)
+
+        def label(row, text):
+            tk.Label(form, text=text + ":", fg=self.FG, bg=self.BG, anchor="w", width=25)\
+                .grid(row=row, column=0, sticky="w", padx=5, pady=6)
+
+        # озвучивать ответ в чате
+        label(0, "Озвучивать ответ в чате")
+        chk = tk.Checkbutton(
+            form, variable=self.opt_use_asr_var,
+            bg=self.BG, fg=self.FG,
+            activebackground=self.BG, activeforeground=self.FG,
+            selectcolor=self.ACCENT,
+            highlightthickness=0, borderwidth=0
+        )
+        chk.grid(row=0, column=1, sticky="w", padx=5, pady=6)
+
+        # выбрать тему
+        label(1, "Тема оформления")
+        theme_frame = tk.Frame(form, bg=self.BG)
+        theme_frame.grid(row=1, column=1, sticky="w", padx=5, pady=6)
+
+        self.opt_theme_menu = tk.OptionMenu(theme_frame, self.opt_theme_var, *theme_list)
+        self.opt_theme_menu.config(
+            bg=self.BTN, fg=self.FG,
+            activebackground=self.ACTIVE_BG, activeforeground=self.FG,
+            relief="flat", highlightthickness=0, padx=8, pady=4
+        )
+        self.opt_theme_menu["menu"].config(
+            bg=self.BTN, fg=self.FG,
+            activebackground=self.ACTIVE_BG, activeforeground=self.FG,
+            relief="flat", borderwidth=0
+        )
+        self.opt_theme_menu.pack(side="left")
+
+        # голос
+        label(2, "Голос TTS")
+        voice_frame = tk.Frame(form, bg=self.BG)
+        voice_frame.grid(row=2, column=1, sticky="w", padx=5, pady=6)
+
+        self.opt_voice_menu = tk.OptionMenu(voice_frame, self.opt_voice_var, *voice_list)
+        self.opt_voice_menu.config(
+            bg=self.BTN, fg=self.FG,
+            activebackground=self.ACTIVE_BG, activeforeground=self.FG,
+            relief="flat", highlightthickness=0, padx=8, pady=4
+        )
+        self.opt_voice_menu["menu"].config(
+            bg=self.BTN, fg=self.FG,
+            activebackground=self.ACTIVE_BG, activeforeground=self.FG,
+            relief="flat", borderwidth=0
+        )
+        self.opt_voice_menu.pack(side="left")
+
+        tk.Button(
+            f, text="Сохранить настройки",
+            command=self.save_options_data,
+            bg=self.ACCENT, fg="white", relief="flat",
+            padx=10, pady=6
+        ).pack(pady=20)
+
+        tk.Label(
+            f,
+            text='Настройки обновляются поле перезагрузки',
+            fg=self.LABEL_FG, bg=self.BG, font=("Arial", 10),
+            justify="center"
+        ).pack(pady=10)
+
+    def save_options_data(self):
+        # сохраняем app_options в data/app_options.json
+        try:
+            theme_list = tuple(settings.THEMES.keys()) or ("white",)
+            voice_list = tuple(TTS_VOICES.keys()) or ("Наталья",)
+
+            theme = (self.opt_theme_var.get() or "").strip()
+            voice = (self.opt_voice_var.get() or "").strip()
+
+            # небольшая нормализация
+            if theme not in theme_list:
+                theme = theme_list[0]
+            if voice not in voice_list:
+                voice = voice_list[0]
+
+            settings.app_options.USE_TTS = bool(self.opt_use_asr_var.get())
+            settings.app_options.THEME = theme
+            settings.app_options.TTS_VOICE = voice
+
+        except Exception:
+            messagebox.showerror("Ошибка", "Некорректные настройки.")
+            return
+
+        if settings.save_app_options(settings.app_options):
+            # применяем тему сразу
+            if hasattr(self, "theme_renew"):
+                try:
+                    self.theme_renew(settings.app_options.THEME)
+                except Exception:
+                    pass
+
+            messagebox.showinfo("Сохранено", "Настройки сохранены.")
+            self.show_home()
+        else:
+            messagebox.showerror("Ошибка", "Не удалось сохранить настройки.")
+
+    def show_options(self):
+        self.raise_frame("options")
+        self.refresh_options_ui()
+
+    def refresh_options_ui(self):
+        # Если вкладка настроек ещё не построена — просто строим
+        if not hasattr(self, "opt_theme_var"):
+            self.build_options()
+            return
+
+        # подгружаем актуальные данные с диска (на случай изменений)
+        settings.load_app_options()
+        opt = settings.app_options
+
+        theme_list = tuple(settings.THEMES.keys()) or ("white",)
+        voice_list = tuple(TTS_VOICES.keys()) or ("Наталья",)
+
+        def normalize(value: str, allowed: tuple[str, ...]) -> str:
+            value = (value or "").strip()
+            return value if value in allowed else allowed[0]
+
+        self.opt_use_asr_var.set(bool(getattr(opt, "USE_TTS", True)))
+        self.opt_theme_var.set(normalize(getattr(opt, "THEME", theme_list[0]), theme_list))
+        self.opt_voice_var.set(normalize(getattr(opt, "TTS_VOICE", voice_list[0]), voice_list))
+
+
 
 
     # О ПРИЛОЖЕНИИ

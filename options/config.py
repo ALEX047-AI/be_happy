@@ -1,5 +1,9 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+import json
+import os
+
 
 class Theme(BaseModel):
     BG: str
@@ -12,30 +16,48 @@ class Theme(BaseModel):
     FONT_SIZE: int = 14
     FONT_NAME: str = "Arial"
 
-"""class AppOptions(BaseModel):
+# список городов (должен совпадать с build_profile)
+city_list = ["Москва", "Оренбург","Новосибирск","Екатеринбург","Красноярск","Нижний Новгород","Челябинск","Уфа","Краснодар","Самара","Ростов-на-Дону","Омск","Воронеж","Пермь","Волгоград"]
 
-    USE_ASR: bool
-    USE_TTS: bool
-    TTS_VOICE: str
-    THEME: str = 'white' # 'black'
-    LANGUAGE = 'russian'
-    CHAT_LANGUAGE = 'russian'
+TTS_VOICES = {
+    "Наталья": {
+        "id": "Nec_24000",
+        "ssml": "",
+        "sample": "",
+        "languages": []
+    },
+    "Марфа": {
+        "id": "May_24000",
+        "ssml": "",
+        "sample": "",
+        "languages": []
+    },
+}
 
-"""
 
 class Settings(BaseSettings):
+
+    class AppOptions(BaseModel):
+        # USE_ASR: bool = True  # Озвучивать ответ ЛЛМ
+        USE_TTS: bool = True  # Озвучивать ответ ЛЛМ        
+        TTS_VOICE: str = "Марфа"  # Голос ЛЛМ - словарь # TTS_VOICES
+        THEME: str = "white"  # 'black' # выбор только Темная и Светлая
+        # LANGUAGE = 'russian'
+        # CHAT_LANGUAGE = 'russian'
+    TTS_VOICE_DEFAULT:str = "Марфа"
+    TTS_VOICE_DEFAULT_ID:str = "May_24000"
 
     DEBUG: bool = False
     LLM_DEBUG: bool = True
 
-    USE_SPEECH: bool = True
+    USE_SPEECH: bool = True #Не используется -> USE_TTS
     SALUTE_TOKEN: str = ""
     SALUTE_TOKEN_URL: str = ""
     SALUTE_RqUID: str = ""
     SALUTE_SYNTHESIZE_URL: str = ""
     SALUTE_RECOGNIZE_URL: str = ""
 
-    MODEL_SOURCE: str = 'openrouter' # mistral | openrouter
+    MODEL_SOURCE: str = 'openrouter'  # mistral | openrouter
 
     OPENROUTER_API_KEY: str = ""
     OPENROUTER_BASE_URL: str = ""
@@ -61,12 +83,18 @@ class Settings(BaseSettings):
     profile_file_name: str = "user_profile.json"
     diary_file_name: str = "diary.json"
 
+    # сохранение в json
+    app_options_file_name: str = "app_options.json"
+
+    # загружаемые/сохраняемые опции приложения
+    app_options: AppOptions = Field(default_factory=AppOptions)
+
     # максимальное количество документов, получаемых от retriever
     retriever_docs_number: int = 2
 
     # tkinter конфигурация
     TITLE: str = "TD — Treatment of Depression"
-    GEOMETRY: str = "900x650"
+    GEOMETRY: str = "900x800"
     MAIN_BTN_TEXT: str = "Быстрый совет"
     MAIN_LABEL_TEXT: str = ("Это образовательное приложение. Если Вам нужна экстренная помощь —\n"
                            "пожалуйста, обратитесь в местные службы поддержки или к близким.")
@@ -116,4 +144,69 @@ class Settings(BaseSettings):
         extra="allow",
     )
 
+    @property
+    def tts_voice(self):
+        try:
+            voice_name = self.app_options.TTS_VOICE
+        except Exception as e:
+            voice_name = self.TTS_VOICE_DEFAULT
+        try:
+            voice_data = TTS_VOICES.get(voice_name, {})
+            voice_id = voice_data.get('id', self.TTS_VOICE_DEFAULT_ID)
+        except Exception as e:
+            voice_id = self.TTS_VOICE_DEFAULT_ID
+
+        return voice_id
+
+
+    def app_options_path(self) -> str:
+        return os.path.join(self.DATA, self.app_options_file_name)
+
+    def load_app_options(self) -> AppOptions:
+        os.makedirs(self.DATA, exist_ok=True)
+        path = self.app_options_path()
+
+        # создать файл если его нет
+        if not os.path.exists(path):
+            self.save_app_options(self.app_options)
+            return self.app_options
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f) or {}
+
+            # формируем из json
+            opt = self.AppOptions(**raw)
+
+            # проверки
+            if opt.TTS_VOICE not in TTS_VOICES:
+                opt.TTS_VOICE = "Наталья" if "Наталья" in TTS_VOICES else next(iter(TTS_VOICES.keys()), "")
+            if opt.THEME not in self.THEMES:
+                opt.THEME = "white" if "white" in self.THEMES else self.THEMES_DEFAULT
+
+            self.app_options = opt
+
+        except Exception:
+            # если json сломан --> настройки оставляем
+            self.app_options = self.AppOptions()
+            self.save_app_options(self.app_options)
+
+        return self.app_options
+
+    def save_app_options(self, options: AppOptions | None = None) -> bool:
+        os.makedirs(self.DATA, exist_ok=True)
+        path = self.app_options_path()
+
+        try:
+            opt = options or self.app_options
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(opt.model_dump(), f, ensure_ascii=False, indent=2)
+            return True
+        except Exception:
+            return False
+
+
 settings = Settings()
+
+# загружаем сохранёные пользователем опции
+settings.load_app_options()
