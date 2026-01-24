@@ -11,15 +11,19 @@ matplotlib.use("TkAgg")
 
 import tkinter as tk
 from tkinter import messagebox
+from tkinter import filedialog
+
+from queue import Queue
+from dataclasses import dataclass
 
 from options.config import settings
 
 from articles import support_phrases
-from profile_manage import load_profile, save_profile, crisis_keywords, load_json, save_json
+from profile_manage import load_profile, save_profile, crisis_keywords, load_json, save_json, xlsx_to_list, dict_to_xlsx
 from llm import LLM_IO  # get_frase_from_llm, get_frase_from_llm_stream
-
+from speech_service import SpeechPlayer, TTS_Stream
 from tkinter_diary import DiaryView
-
+from idlelib.tooltip import Hovertip
 
 DATA = settings.DATA
 DIARY_PATH = os.path.join(DATA, settings.diary_file_name)
@@ -59,9 +63,56 @@ class TDApp(tk.Tk):
         else:
             self.show_home()
 
-        self.llm_item = LLM_IO(self.profile, settings.MODEL_SOURCE)
+
+        self.q_text = Queue()
+        self.q_speech = Queue()
+        self.player = None
+        self.tts_stream = None
+        self.llm_item = None
+
+        if settings.USE_SPEECH:
+            self.player = SpeechPlayer(q_in=self.q_speech, finished_item=True, daemon=True)
+            self.player.start()
+
+            self.tts_stream = TTS_Stream(q_in=self.q_text, q_out=self.q_speech, daemon=True,
+                                finished_item=True, save_to_disk=False,
+                                sample_rate=24000, channels=1
+                    )
+            self.tts_stream.start()
+
+        self.llm_item = LLM_IO(self.profile, settings.MODEL_SOURCE, ai_intro=settings.CHAT_INTRO_TEXT)
+        self.llm_item.text_stream_last_queue = self.q_text
 
         self._active_stream = None  # для отмены предыдущего потока, если это нужно
+
+
+    def player_pause(self):
+        if self.player is not None:
+            self.player.pause()
+
+    def player_resume(self):
+        if self.player is not None:
+            self.player.resume()
+
+    def llm_queue_pause(self):
+        if self.llm_item:
+            self.llm_item.pause_last_llm_text_stream_to_queue()
+
+    def tts_stream_resume(self):
+        if self.tts_stream is not None:
+            self.tts_stream.resume_queue()
+
+    def player_stop(self, full_stop=True):
+        # только для прерывания генерации. такой как СТОП.
+        # для кнопки отправка сообщения это не нужно
+        if full_stop:
+            self.llm_queue_pause()
+            if self.tts_stream is not None:
+                self.tts_stream.stop_queue()
+        if self.player is not None:
+            # self.player.pause()
+            self.player.stop()
+            # self.player.resume()
 
 
     def theme_renew(self, name=settings.THEMES_DEFAULT):
@@ -106,8 +157,190 @@ class TDApp(tk.Tk):
         self.build_profile()
         self.build_about()
 
+
+    # Функции экспорта
+    def export_profile(self, initialfile=None):
+
+        if initialfile is None:
+            initialfile = f'Профиль {self.profile.get("Имя", "Пользователя")}'
+
+        path = filedialog.asksaveasfilename(
+            title="Экспорт профиля",
+            defaultextension=".json",
+            initialfile=initialfile,
+            filetypes=[("JSON", "*.json")]
+        )
+        if not path:
+            return
+        try:
+            save_json(path, self.profile)
+            messagebox.showinfo("OK", "Профиль экспортирован.")
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось экспортировать профиль:\n{e}")
+
+    def export_diary0(self, initialfile=None):
+        if initialfile is None:
+            initialfile = f'Дневник {self.profile.get("Имя", "Пользователя")}'
+
+        path = filedialog.asksaveasfilename(
+            title="Экспорт дневника",
+            defaultextension=".json",
+            initialfile=initialfile,
+            filetypes=[("JSON", "*.json")]
+        )
+        if not path:
+            return
+        try:
+            save_json(path, self.diary)
+            messagebox.showinfo("OK", "Дневник экспортирован.")
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось экспортировать дневник:\n{e}")
+
+    def export_diary(self, initialfile=None):
+        if initialfile is None:
+            initialfile = f'Дневник {self.profile.get("Имя", "Пользователя")}'
+
+        path = filedialog.asksaveasfilename(
+            title="Экспорт дневника (json или xlsx)",
+            defaultextension=".json",
+            initialfile=initialfile,
+            filetypes=[
+                ("JSON", "*.json"),
+                ("Excel (XLSX)", "*.xlsx"),
+            ],
+        )
+        if not path:
+            return
+
+        ext = os.path.splitext(path)[1].lower()
+
+        try:
+            if ext == ".json":
+                save_json(path, self.diary)
+            elif ext == ".xlsx":
+                dict_to_xlsx(self.diary, path)
+            else:
+                messagebox.showerror("Ошибка", "Выберите .json или .xlsx")
+                return
+
+            messagebox.showinfo("OK", "Дневник экспортирован.")
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось экспортировать дневник:\n{e}")
+
+    def update_llm_profile(self):
+        # Обновляем LLM profile без потери данных профиля
+        # И очищаем историю
+        if hasattr(self, "llm_item") and self.llm_item is not None:
+            self.llm_item.update_profile(self.profile)
+            self.llm_item.clear_history()
+
+    def import_profile(self):
+        path = filedialog.askopenfilename(
+            title="Импорт профиля",
+            filetypes=[("JSON", "*.json")]
+        )
+        if not path:
+            return
+        try:
+            data = load_json(path, {})
+            if not isinstance(data, dict):
+                message = "Файл профиля должен быть формата JSON."
+                messagebox.showinfo("OK", message)
+                raise ValueError(message)
+
+            self.profile = data
+            save_profile(self.profile)  # так же обновляем данные на диске
+            self.renew_chat(clean_llm_history=False)
+            self.update_llm_profile()
+
+            # Обновляем данные о пользователе в Интерфейсе
+            try:
+                self.refresh_profile_ui()
+            except Exception:
+                pass
+
+            messagebox.showinfo("OK", "Профиль импортирован.")
+            self.show_profile()
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось импортировать профиль:\n{e}")
+
+    def import_diary0(self):
+        path = filedialog.askopenfilename(
+            title="Импорт дневника",
+            filetypes=[("JSON", "*.json")]
+        )
+        if not path:
+            return
+        try:
+            data = load_json(path, [])
+            if not isinstance(data, list):
+                message = "Файл дневника должен быть формата JSON."
+                messagebox.showinfo("OK", message)
+                raise ValueError(message)
+            self.diary = data
+            save_json(DIARY_PATH, self.diary)  # так же обновляем данные на диске
+
+            # обновляем данные о дневнике во вкладке
+            if hasattr(self, "diary_view") and self.diary_view is not None:
+                self.diary_view.diary = self.diary
+                self.diary_view.refresh()
+
+            messagebox.showinfo("OK", "Дневник импортирован.")
+            self.show_diary()
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось импортировать дневник:\n{e}")
+
+    def import_diary(self):
+        path = filedialog.askopenfilename(
+            title="Импорт дневника (json, xlsx)",
+            filetypes=[
+                ("JSON", "*.json"),
+                ("Excel (XLSX)", "*.xlsx"),
+            ],
+        )
+        if not path:
+            return
+
+        ext = os.path.splitext(path)[1].lower()
+
+        try:
+            if ext == ".json":
+                data = load_json(path, [])
+                if not isinstance(data, list):
+                    raise ValueError("Файл дневника должен содержать JSON-массив (list).")
+            elif ext == ".xlsx":
+                data = xlsx_to_list(path)
+                if not isinstance(data, list):
+                    raise ValueError("XLSX должен быть преобразован в list[dict].")
+            else:
+                messagebox.showerror("Ошибка", "Выберите .json или .xlsx")
+                return
+
+            self.diary = data
+            save_json(DIARY_PATH, self.diary)  # сохраняем в стандартное место приложения
+
+            if hasattr(self, "diary_view") and self.diary_view is not None:
+                self.diary_view.diary = self.diary
+                self.diary_view.refresh()
+
+            messagebox.showinfo("OK", "Дневник импортирован.")
+            self.show_diary()
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось импортировать дневник:\n{e}")
+
     def create_menu(self):
         menubar = tk.Menu(self)
+
+        # Добавляем меню Файл
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="Экспорт Профиля", command=self.export_profile)
+        file_menu.add_command(label="Импорт Профиля", command=self.import_profile)
+        file_menu.add_separator()
+        file_menu.add_command(label="Экспорт Дневника", command=self.export_diary)
+        file_menu.add_command(label="Импорт Дневника", command=self.import_diary)
+        file_menu.add_separator()
+        file_menu.add_command(label="Выход", underline=0, command=self.destroy)
+        menubar.add_cascade(label="Файл", menu=file_menu)
 
         # верхнее меню
         menubar.add_command(label="Главная", underline=0, command=self.show_home)
@@ -115,7 +348,6 @@ class TDApp(tk.Tk):
         menubar.add_command(label="Дневник", underline=0, command=self.show_diary)
         menubar.add_command(label="Профиль", underline=0, command=self.show_profile)
         menubar.add_command(label="О проекте", underline=0, command=self.show_about)
-        menubar.add_command(label="Выход", underline=0, command=self.destroy)
         # menubar.add_command(label="Черная", command=self.theme_renew)
 
         self.config(menu=menubar)
@@ -131,7 +363,7 @@ class TDApp(tk.Tk):
         # self.bind_all("<KeyPress>", self.on_ctrl_shortcuts)
         # self.bind_all("<KeyPress>", lambda e: print(e.keysym, repr(e.char), e.state))
 
-        # обработка горячих главиш
+        # обработка горячих клавиш
         self.bind_all("<Control-KeyPress>", self.on_ctrl_shortcuts)
 
     def on_ctrl_shortcuts(self, e):
@@ -300,6 +532,10 @@ class TDApp(tk.Tk):
             hasattr(self, "llm_item") and self.llm_item is not None:
                 self.llm_item.clear_history()
 
+        # self.tts_stream.stop_generation()
+        self.player_stop()
+        self.player_resume()
+        # self.tts_stream_resume()
 
     def build_chat(self):
         f = self.frames["chat"]
@@ -326,7 +562,7 @@ class TDApp(tk.Tk):
         self.user_entry.pack(pady=10)
         self.user_entry.bind("<Return>", lambda e: self.send_message())
 
-        # Делаем новый фрейм для кнопок
+        # Всплывающая подсказка к кнопке
         btn_row = tk.Frame(f, bg=self.BG)
         btn_row.pack(pady=(0, 10), fill="x")
 
@@ -348,6 +584,37 @@ class TDApp(tk.Tk):
         )
         self.clear_btn.pack(side="left", padx=5)
 
+        # Кнопки управление аудио
+
+        self.pause_btn = tk.Button(
+            btn_row, text="Пауза",
+            command=self.player_pause,
+            bg=self.ACCENT, fg="white",
+            relief="flat", padx=10, pady=6
+        )
+        self.pause_btn.pack(side="left", padx=5)
+        Hovertip(self.pause_btn, 'Проджить воспроизведение', hover_delay=500)
+
+        self.resume_btn = tk.Button(
+            btn_row, text="Продолжить",
+            command=self.player_resume,
+            bg=self.ACCENT, fg="white",
+            relief="flat", padx=10, pady=6
+        )
+        self.resume_btn.pack(side="left", padx=5)
+        Hovertip(self.resume_btn, 'Проджить воспроизведение', hover_delay=500)
+
+        self.stop_btn = tk.Button(
+            btn_row, text="Стоп",
+            command=self.player_stop,
+            bg=self.ACCENT, fg="white",
+            relief="flat", padx=10, pady=6
+        )
+        self.stop_btn.pack(side="left", padx=5)
+        # о всплывающую подсказку к кнопке
+        Hovertip(self.stop_btn, 'Проджит воспроизведение только после нового ответа', hover_delay=500)
+
+
         tk.Label(btn_row, bg=self.BG, text="").pack(side="left", expand=True)
 
         self.chat_set_intro()
@@ -360,8 +627,14 @@ class TDApp(tk.Tk):
             return
         self.user_entry.delete(0, tk.END)
 
+        # self.tts_stream.stop_generation()
+        self.player_stop(full_stop=False)
+        self.player_resume()
+        self.tts_stream_resume()
+
         self.append_chat(f"\n{settings.USER_CHAT_PREFIX}{msg}\n")
         lower = msg.lower()
+
 
         if settings.USE_LLM:
             try:
@@ -388,7 +661,7 @@ class TDApp(tk.Tk):
                     self.user_entry.focus_set()
 
                 def on_error(e):
-                    self.append_chat(f"\n[Ошибка LLM: {e}]\n")
+                    self.append_chat(f"\n[Ошибка LLM: {repr(e)}]\n")
                     self.user_entry.configure(state="normal")
                     self.send_btn.configure(state="normal")
                     self.user_entry.focus_set()
@@ -659,11 +932,7 @@ class TDApp(tk.Tk):
         if save_profile(data):
             self.profile = data
 
-            # Обновляем LLM profile без потери данных профиля
-            # И очищаем историю
-            if hasattr(self, "llm_item") and self.llm_item is not None:
-                self.llm_item.update_profile(self.profile)
-                self.llm_item.clear_history()
+            self.update_llm_profile()
 
             messagebox.showinfo("Сохранено", "Профиль сохранён.")
             self.show_home()
@@ -672,6 +941,44 @@ class TDApp(tk.Tk):
 
     def show_profile(self):
         self.raise_frame("profile")
+
+    def refresh_profile_ui(self):
+        # Если вкладка профиля ещё не построена — просто строим
+        if not hasattr(self, "name_var"):
+            self.build_profile()
+            return
+
+        def normalize(value: str, allowed: tuple[str, ...]) -> str:
+            value = (value or "").strip()
+            return value if value in allowed else ""
+
+        self.name_var.set(str(self.profile.get("Имя", "")))
+        self.gender_var.set(normalize(self.profile.get("Пол", ""), ("Мужской", "Женский")))
+        self.birth_var.set(str(self.profile.get("Дата рождения", "")))
+        self.marital_var.set(normalize(
+            self.profile.get("Семейное положение", ""),
+            ("Холост / Не замужем", "Женат / Замужем"),
+        ))
+        self.parents_var.set(normalize(self.profile.get("Родители", ""), ("Да", "Нет")))
+        self.friends_var.set(normalize(self.profile.get("Друзья", ""), ("Да", "Нет")))
+
+        try:
+            children_default = int(self.profile.get("Дети", 0))
+        except Exception:
+            children_default = 0
+        self.children_var.set(max(0, min(10, children_default)))
+
+        pets_default = str(self.profile.get("Домашние животные", ""))
+        comment_default = str(self.profile.get("Комментарий", ""))
+
+        if hasattr(self, "pets_text"):
+            self.pets_text.delete("1.0", "end")
+            self.pets_text.insert("1.0", pets_default)
+
+        if hasattr(self, "comment_text"):
+            self.comment_text.delete("1.0", "end")
+            self.comment_text.insert("1.0", comment_default)
+
 
     # О ПРИЛОЖЕНИИ
 

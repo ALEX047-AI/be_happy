@@ -12,15 +12,28 @@ class Theme(BaseModel):
     FONT_SIZE: int = 14
     FONT_NAME: str = "Arial"
 
+"""class AppOptions(BaseModel):
+
+    USE_ASR: bool
+    USE_TTS: bool
+    TTS_VOICE: str
+    THEME: str = 'white' # 'black'
+    LANGUAGE = 'russian'
+    CHAT_LANGUAGE = 'russian'
+
+"""
+
 class Settings(BaseSettings):
 
     DEBUG: bool = False
     LLM_DEBUG: bool = True
 
-    SALUT_TOKEN: str = ""
-    SALUT_TOKEN_URL: str = ""
-    SALUT_RqUID: str = ""
-    SALUT_SYNTHESIZE_URL: str = ""
+    USE_SPEECH: bool = True
+    SALUTE_TOKEN: str = ""
+    SALUTE_TOKEN_URL: str = ""
+    SALUTE_RqUID: str = ""
+    SALUTE_SYNTHESIZE_URL: str = ""
+    SALUTE_RECOGNIZE_URL: str = ""
 
     MODEL_SOURCE: str = 'openrouter' # mistral | openrouter
 
@@ -72,7 +85,7 @@ class Settings(BaseSettings):
     ACCENT: str = "#3A7AFE"
     PANEL: str = "#151515" """
 
-    THEMES_DEFAULT: str = 'white'
+    THEMES_DEFAULT: str = 'black'
     THEMES: dict[str, Theme] = {
         "black": Theme(
             BG="#101010",

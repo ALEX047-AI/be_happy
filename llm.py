@@ -9,19 +9,29 @@ from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 
 import random
+import threading
 
 from articles import main_articles, support_phrases
 from options.config import settings
 
 
+from queue import Queue
+
 class LLM_IO:
 
-    def __init__(self, human_profile, model_source="openrouter"):
+    def __init__(self, human_profile, model_source="openrouter", ai_intro: str=None):
 
         self.last_llm_answer = ""
         self.model_source = model_source
         self.human_profile = human_profile
-        self.history = []  # chat history ONLY (no profile here)
+        self.history = []  # история чата с ЛЛМ
+        self.ai_intro = ai_intro
+        if self.ai_intro is not None and isinstance(self.ai_intro, str):
+            self.history.append(AIMessage(content=self.ai_intro))
+
+        self.text_stream_last_queue = Queue()
+        self._text_to_queue_event_pause = threading.Event()  # Если снят то отправляем в очередь
+        self._text_to_queue_event_pause.clear() # устанавливаем в значение отправка в очередь
 
         if self.model_source == "mistral":
             ...
@@ -53,7 +63,7 @@ class LLM_IO:
         self.request = f'Данные обо мне: {self.profile}'
         print(f'{self.request = }')
 
-        self.history = [HumanMessage(content=self.request)]
+        # self.history = [HumanMessage(content=self.request)]
 
         knowledge_store = [
             Document(page_content=article) for article in main_articles
@@ -64,7 +74,7 @@ class LLM_IO:
         # Профиль человека теперь в system
         prompt = ChatPromptTemplate.from_messages([
             ("system", (
-            'Ты ассистент эмоциональной поддержки, не человек. '
+            'Ты ассистент эмоциональной поддержки, не человек. Ты женщина.'
             'Не говори от своего имени. что вы что-то может вместе с пользователем. эмоциональную поддержку могут оказать другие люди, которых упомянул пользователь. '
             'Но если по контексту подходит напомни, что у человека есть близкие ему люди которые упомянул сам человек и они могут помочь человеку, сделать что-то вместе. '
             'Ты мягко, бережно и уважительно общаешься с пользователями, которые могут находиться в сложном эмоциональном состоянии. '
@@ -94,7 +104,7 @@ class LLM_IO:
             strategy="last",
             token_counter=len,
             max_tokens=settings.LLM_TRIMMER_MAX_TOKENS,
-            start_on="human",
+            # start_on="human",
             end_on="human",
             include_system=True,
             allow_partial=False,
@@ -129,6 +139,8 @@ class LLM_IO:
         result = chain_no_rag.invoke("График")
         print(result) """
 
+    def pause_last_llm_text_stream_to_queue(self):
+        self._text_to_queue_event_pause.set()
 
     def update_profile(self, human_profile: dict):
         """Обновить профиль в уже созданном классе без потери истории"""
@@ -137,6 +149,8 @@ class LLM_IO:
     def clear_history(self):
         """Обнулить историю"""
         self.history = []
+        if self.ai_intro is not None and isinstance(self.ai_intro, str):
+            self.history.append(AIMessage(content=self.ai_intro))
 
     def _profile_text(self) -> str:
         profile = ", ".join(
@@ -175,15 +189,41 @@ class LLM_IO:
     def get_frase_from_llm_stream(self, question="дай мне совет"):
         self.history.append(HumanMessage(content=question))
         self.last_llm_answer = ""
+        self._text_to_queue_event_pause.clear()
 
         if settings.USE_LLM:
-            for msg_chunk in self.chain.stream({
-                "question": question,
-                "history": self.history,
-                "human_profile": self._profile_text(),
-            }):
-                self.last_llm_answer += msg_chunk
-                yield msg_chunk
+            count = -1
+            msg_chunk_packed = ""
+            msg_chunk_list = []
+            try:
+                for msg_chunk in self.chain.stream({
+                    "question": question,
+                    "history": self.history,
+                    "human_profile": self._profile_text(),
+                }):
+                    self.last_llm_answer += msg_chunk
+                    if isinstance(msg_chunk, str):
+                        msg_chunk_list.append(msg_chunk)
+                        if msg_chunk.endswith(('\n', '.')):
+                            msg_chunk_packed = ''.join(msg_chunk_list)
+                            msg_chunk_packed = msg_chunk_packed.strip(' \n')
+                            if msg_chunk_packed:
+                                count += 1
+                                if not self._text_to_queue_event_pause.is_set():
+                                    self.text_stream_last_queue.put(msg_chunk_packed)
+                                if settings.LLM_DEBUG:
+                                    print(f'{count = }, {msg_chunk_packed =  }')
+                            msg_chunk_list = []
+                            msg_chunk_packed = ""
+                    # print(f'chunk № {count}, {msg_chunk = }')
+                    yield msg_chunk
+            finally:
+                self._text_to_queue_event_pause.clear()
+
+            if settings.LLM_DEBUG:
+                print(f'{count = }, qsize = {self.text_stream_last_queue.qsize()}')
+
+
         else:
             chunk = random.choice(support_phrases)
             self.last_llm_answer = chunk
@@ -213,10 +253,14 @@ if __name__ == '__main__':
 
     question = "дай мне совет"
     llm_item = LLM_IO(human_profile)
+    # print(f'qsize start = {llm_item.text_stream_last_queue.qsize()}')
+    # from time import sleep
+    # sleep(2)
     for msg_chunk in llm_item.get_frase_from_llm_stream(question):
         print(msg_chunk, end='', flush=True)
 
     print(f'\n________________________________________')
     print(llm_item.print_messages(llm_item.history))
+
     # result = chain.invoke({"question": question, "history": history})
     # print(result)

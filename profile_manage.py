@@ -1,3 +1,4 @@
+import pandas as pd
 import os, json
 from options.config import settings
 
@@ -54,3 +55,53 @@ def load_json(path, default):
 def save_json(path, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def dict_to_xlsx(data, file_name_xlsx):
+    """конвертируем из dict to xlsx"""
+
+    df = pd.DataFrame(data)
+    # если есть колонка date - превратим ISO-строку в datetime, чтобы Excel показывал нормальную дату
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+
+    # чтобы пустые тексты не превращались в NaN
+    for col in ("text", "comment"):
+        if col in df.columns:
+            df[col] = df[col].fillna("")
+
+    # out_xlsx = f"{file_name}.xlsx"
+    with pd.ExcelWriter(file_name_xlsx, engine="openpyxl", datetime_format="yyyy-mm-dd hh:mm") as writer:
+        df.to_excel(writer, index=False)
+
+
+def xlsx_to_list(file_name_xlsx):
+    """конвертируем xlsx в dict"""
+
+    df2=pd.read_excel(file_name_xlsx, )
+    df2['text'] = df2['text'].fillna("")
+
+
+    # если есть колонка date - приводим к ISO строке обратно
+    if "date" in df2.columns:
+        df2["date"] = pd.to_datetime(df2["date"], errors="coerce").dt.strftime("%Y-%m-%dT%H:%M:%S")
+        # если были пустые/битые даты - они станут NaT -> "NaT", исправим на ""
+        df2["date"] = df2["date"].replace("NaT", "")
+
+    df2_list = df2.to_dict(orient="records")
+    return df2_list
+
+if __name__ == "__main__":
+
+    file_name='diary.json'
+    file_name_xlsx='diary.json.xlsx'
+
+    data_dict = load_json(file_name, {})
+    dict_to_xlsx(data_dict, file_name_xlsx)
+
+    df2_list=xlsx_to_list(file_name_xlsx)
+
+    out_json = f"{file_name_xlsx}.json"
+    save_json(out_json, df2_list)
+
+    print("Saved:", out_json)
