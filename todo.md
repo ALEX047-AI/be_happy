@@ -1,3 +1,8 @@
+# Для запуска 
+Debian/Ubuntu: sudo apt-get install portaudio19-dev
+Далее в Windows MacOS Ubuntu
+запустить main.pyw или main.py
+
 # В работе
 
 интеграция с сервисом https://afisha7.ru/ - отказали
@@ -149,4 +154,3 @@
 
 и добавить это всё в презентацию
 
-Debian/Ubuntu: sudo apt-get install portaudio19-dev
