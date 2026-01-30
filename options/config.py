@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import BaseModel, Field
+from zoneinfo import ZoneInfo
 
 import json
 import os
@@ -17,21 +18,60 @@ class Theme(BaseModel):
     FONT_NAME: str = "Arial"
 
 # список городов (должен совпадать с build_profile)
-city_list = ["Москва", "Оренбург","Новосибирск","Екатеринбург","Красноярск","Нижний Новгород","Челябинск","Уфа","Краснодар","Самара","Ростов-на-Дону","Омск","Воронеж","Пермь","Волгоград"]
+city_list = ["Москва", "Санкт-Петербург", "Оренбург",
+             'Абакан', 'Альметьевск', 'Ангарск', 'Арзамас', 'Армавир', 'Артём', 'Архангельск', 'Астрахань', 'Балаково', 'Балашиха', 'Барнаул', 'Батайск', 'Белгород', 'Бердск', 'Березники', 'Бийск', 'Благовещенск', 'Братск', 'Брянск', 'Великий Новгород', 'Видное', 'Владивосток', 'Владикавказ', 'Владимир', 'Волгоград', 'Волгодонск', 'Волжский', 'Вологда', 'Воронеж', 'Грозный', 'Дербент', 'Дзержинск', 'Димитровград', 'Долгопрудный', 'Домодедово', 'Евпатория', 'Екатеринбург', 'Ессентуки', 'Жуковский', 'Златоуст', 'Иваново', 'Ижевск', 'Иркутск', 'Йошкар-Ола', 'Казань', 'Калининград', 'Калуга', 'Каменск-Уральский', 'Камышин', 'Каспийск', 'Кемерово', 'Керчь', 'Киров', 'Кисловодск', 'Ковров', 'Коломна', 'Комсомольск-на-Амуре', 'Копейск', 'Королёв', 'Кострома', 'Красногорск', 'Краснодар', 'Красноярск', 'Курган', 'Курск', 'Кызыл', 'Липецк', 'Люберцы', 'Магнитогорск', 'Майкоп', 'Махачкала', 'Миасс', 'Михайловск', 'Мурино', 'Мурманск', 'Муром', 'Мытищи', 'Набережные Челны', 'Назрань', 'Нальчик', 'Находка', 'Невинномысск', 'Нефтекамск', 'Нефтеюганск', 'Нижневартовск', 'Нижнекамск', 'Нижний Новгород', 'Нижний Тагил', 'Новокузнецк', 'Новомосковск', 'Новороссийск', 'Новосибирск', 'Новочебоксарск', 'Новочеркасск', 'Новошахтинск', 'Новый Уренгой', 'Ногинск', 'Норильск', 'Ноябрьск', 'Обнинск', 'Одинцово', 'Октябрьский', 'Омск', 'Орехово-Зуево', 'Орск', 'Орёл', 'Пенза', 'Первоуральск', 'Пермь', 'Петрозаводск', 'Петропавловск-Камчатский', 'Подольск', 'Прокопьевск', 'Псков', 'Пушкино', 'Пятигорск', 'Раменское', 'Реутов', 'Ростов-на-Дону', 'Рубцовск', 'Рыбинск', 'Рязань', 'Салават', 'Самара', 'Саранск', 'Саратов', 'Севастополь', 'Северодвинск', 'Северск', 'Серпухов', 'Симферополь', 'Смоленск', 'Сочи', 'Ставрополь', 'Старый Оскол', 'Стерлитамак', 'Сургут', 'Сызрань', 'Сыктывкар', 'Таганрог', 'Тамбов', 'Тверь', 'Тольятти', 'Томск', 'Тула', 'Тюмень', 'Улан-Удэ', 'Ульяновск', 'Уссурийск', 'Уфа', 'Хабаровск', 'Ханты-Мансийск', 'Хасавюрт', 'Химки', 'Чебоксары', 'Челябинск', 'Череповец', 'Черкесск', 'Чита', 'Шахты', 'Щёлково', 'Электросталь', 'Элиста', 'Энгельс', 'Южно-Сахалинск', 'Якутск', 'Ярославль']
 
 TTS_VOICES = {
-    "Наталья": {
-        "id": "Nec_24000",
-        "ssml": "",
-        "sample": "",
-        "languages": []
-    },
     "Марфа": {
         "id": "May_24000",
+        "gender": "female",
         "ssml": "",
         "sample": "",
-        "languages": []
+        "languages": ["ru"]
     },
+    "Наталья": {
+        "id": "Nec_24000",
+        "gender": "female",
+        "ssml": "",
+        "sample": "",
+        "languages": ["ru"]
+    },
+    "Александра": {
+        "id": "Ost_24000",
+        "gender": "female",
+        "ssml": "",
+        "sample": "",
+        "languages": ["ru"]
+    },
+
+    "Борис": {
+        "id": "Bys_24000",
+        "gender": "male",
+        "ssml": "",
+        "sample": "",
+        "languages": ["ru"]
+    },
+    "Тарас": {
+        "id": "Tur_24000",
+        "gender": "male",
+        "ssml": "",
+        "sample": "",
+        "languages": ["ru"]
+    },
+    "Сергей": {
+        "id": "Pon_24000",
+        "gender": "male",
+        "ssml": "",
+        "sample": "",
+        "languages": ["ru"]
+    },
+    # "Kira": {
+    #     "id": "Kin_24000",
+    #     "gender": "female",
+    #     "ssml": "",
+    #     "sample": "",
+    #     "languages": ["en"]
+    # },
 }
 
 
@@ -39,16 +79,30 @@ class Settings(BaseSettings):
 
     class AppOptions(BaseModel):
         # USE_ASR: bool = True  # Озвучивать ответ ЛЛМ
-        USE_TTS: bool = True  # Озвучивать ответ ЛЛМ        
+        USE_TTS: bool = True  # Озвучивать ответ ЛЛМ
         TTS_VOICE: str = "Марфа"  # Голос ЛЛМ - словарь # TTS_VOICES
-        THEME: str = "white"  # 'black' # выбор только Темная и Светлая
+        THEME: str = "Тёмная"  # 'Тёмная' # выбор только Темная и Светлая
         # LANGUAGE = 'russian'
         # CHAT_LANGUAGE = 'russian'
+
     TTS_VOICE_DEFAULT:str = "Марфа"
     TTS_VOICE_DEFAULT_ID:str = "May_24000"
+    LLM_GENDER_DEFAULT: str = 'female'
+    gender_dict: dict = {
+        'female': 'Женщина',
+        'male': 'Мужчина'
+    }
+    tz:ZoneInfo = ZoneInfo("Europe/Moscow")
 
     DEBUG: bool = False
     LLM_DEBUG: bool = True
+
+    # события
+    TIMEPAD_BASE_URL:str = ""
+    TIMEPAD_TOKEN:str = ""
+    EVENT_LIMIT_LOAD: int = 10
+    EVENT_LIMIT_SEND_TO_LLM: int = 10
+    PROBA_LIMIT: float = 0.50
 
     USE_SPEECH: bool = True #Не используется -> USE_TTS
     SALUTE_TOKEN: str = ""
@@ -57,23 +111,30 @@ class Settings(BaseSettings):
     SALUTE_SYNTHESIZE_URL: str = ""
     SALUTE_RECOGNIZE_URL: str = ""
 
-    MODEL_SOURCE: str = 'openrouter'  # mistral | openrouter
+    MODEL_SOURCE: str = 'mistral'  # mistral | openrouter
 
     OPENROUTER_API_KEY: str = ""
     OPENROUTER_BASE_URL: str = ""
+    OPENROUTER_TEMPERATURE: int = 0
+    # OPENROUTER_MODEL: str = "arcee-ai/trinity-large-preview:free"
+    OPENROUTER_MODEL: str = 'tngtech/deepseek-r1t2-chimera:free'
+    # OPENROUTER_MODEL: str = 'qwen/qwen3-next-80b-a3b-instruct:free'
 
-    OPENROUTER_MODEL: str = 'google/gemma-3-27b-it:free'
+    # больше не поддерживаются
+    # OPENROUTER_MODEL: str = 'google/gemma-3-27b-it:free'
+    # OPENROUTER_MODEL: str = "mistralai/mistral-small-3.2-24b-instruct:free"
     #   model="mistralai/mistral-7b-instruct:free"
-    #   model="mistralai/mistral-small-3.2-24b-instruct:free"
 
     MISTRAL_API_KEY: str
     MISTRAL_BASE_URL: str
+    MISTRAL_TEMPERATURE: int = 0
     MISTRAL_MODEL: str = 'mistral-large-latest'
     # MISTRAL_MODEL: str = 'open-mistral-7b'
     #   model_name="mistral-large-latest"
 
     USE_LLM: bool = True
     USE_STREAM: bool = True
+    USE_EVENTS: bool = True
     LLM_TRIMMER_MAX_TOKENS: int = 6
 
     TD_CHAT_PREFIX: str = 'TD: '
@@ -94,7 +155,7 @@ class Settings(BaseSettings):
 
     # tkinter конфигурация
     TITLE: str = "TD — Treatment of Depression"
-    GEOMETRY: str = "900x800"
+    GEOMETRY: str = "700x600"
     MAIN_BTN_TEXT: str = "Быстрый совет"
     MAIN_LABEL_TEXT: str = ("Это образовательное приложение. Если Вам нужна экстренная помощь —\n"
                            "пожалуйста, обратитесь в местные службы поддержки или к близким.")
@@ -113,9 +174,9 @@ class Settings(BaseSettings):
     ACCENT: str = "#3A7AFE"
     PANEL: str = "#151515" """
 
-    THEMES_DEFAULT: str = 'black'
+    THEMES_DEFAULT: str = 'Тёмная'
     THEMES: dict[str, Theme] = {
-        "black": Theme(
+        "Тёмная": Theme(
             BG="#101010",
             ACTIVE_BG="#2a2a2a",
             FG="#EAEAEA",
@@ -126,7 +187,7 @@ class Settings(BaseSettings):
             FONT_SIZE=14,
             FONT_NAME="Arial"
         ),
-        "white": Theme(
+        "Светлая": Theme(
             BG="#f4f4f4",
             ACTIVE_BG="#e6e6e6",
             FG="#111111",
@@ -158,6 +219,21 @@ class Settings(BaseSettings):
 
         return voice_id
 
+    @property
+    def llm_gender(self):
+        gender = self.LLM_GENDER_DEFAULT
+        try:
+            voice_name = self.app_options.TTS_VOICE
+        except Exception as e:
+            voice_name = self.TTS_VOICE_DEFAULT
+        try:
+            voice_data = TTS_VOICES.get(voice_name, {})
+            gender = voice_data.get('gender', self.LLM_GENDER_DEFAULT)
+        except Exception as e:
+            voice_id = self.TTS_VOICE_DEFAULT_ID
+
+        return self.gender_dict.get(gender, '')
+
 
     def app_options_path(self) -> str:
         return os.path.join(self.DATA, self.app_options_file_name)
@@ -182,7 +258,7 @@ class Settings(BaseSettings):
             if opt.TTS_VOICE not in TTS_VOICES:
                 opt.TTS_VOICE = "Наталья" if "Наталья" in TTS_VOICES else next(iter(TTS_VOICES.keys()), "")
             if opt.THEME not in self.THEMES:
-                opt.THEME = "white" if "white" in self.THEMES else self.THEMES_DEFAULT
+                opt.THEME = "Светлая" if "Светлая" in self.THEMES else self.THEMES_DEFAULT
 
             self.app_options = opt
 

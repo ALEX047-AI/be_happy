@@ -2,3 +2,13 @@ llm_cred.py
 .env
 *.pyc
 llm_temp.py
+llm_2026_01_24.py
+tkinter_main_7_2026_01_21.py
+tkinter_main_7_bak.py
+tkinter_main_7_bak_1.py
+llm_2026_01_26.py
+*.csv
+*.ods
+*.xlsx
+
+llm.py.bak

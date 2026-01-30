@@ -2,6 +2,7 @@ import pandas as pd
 import os, json
 from options.config import settings
 import pandas as pd
+from pandas.api.types import is_string_dtype
 
 profile_file = f"{settings.DATA}/{settings.profile_file_name}"
 
@@ -13,7 +14,7 @@ crisis_keywords = [
 profile_fields = [
     "Имя",
     "Пол",
-    # "Город",
+    "Город",
     "Дата рождения",
     "Семейное положение",
     "Родители",
@@ -22,10 +23,10 @@ profile_fields = [
     "Домашние животные",
     # "Принимаете ли медикаменты",
     # "Наблюдаетесь ли у врача",
-    # "Хобби, интересы",
+    "Хобби, интересы",
     "Комментарий",
 ]
-
+diary_fields = ['date', 'mood', 'text']
 
 def load_profile():
     if os.path.exists(profile_file):
@@ -77,7 +78,7 @@ def dict_to_file1(data, file_name_xlsx, format='xlsx'):
         df.to_excel(writer, index=False)
 
 
-def dict_to_sheet(data, file_name, format="xlsx"):
+def dict_to_sheet0(data, file_name, format="xlsx"):
     """
     Сохраняем dict или list в файл формата xlsx  ods  csv
     """
@@ -122,6 +123,67 @@ def dict_to_sheet(data, file_name, format="xlsx"):
 
     return out_path
 
+def dict_to_sheet(data, file_name, format="xlsx"):
+    """
+    Сохраняем dict или list в файл формата xlsx  ods  csv
+    """
+    if isinstance(data, dict):
+        data = [data]
+        use_index = True
+        use_header = False
+        do_transpose = True
+    else:
+        use_index = False
+        use_header = True
+        do_transpose = False
+
+    fmt = (format or "xlsx").lower().lstrip(".")
+    df = pd.DataFrame(data)
+
+    # Если это словарь (напрмер Профиль), то переворачиваем
+    if do_transpose:
+        df = df.T
+
+    # форматируем столбец дат
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+
+    # пустые колонки в пустую строку
+    for col in ("text", "comment", "Комментарий"):
+        if col in df.columns:
+            df[col] = df[col].fillna("")
+
+    # сверяем расширение и формат
+    ext = f".{fmt}"
+    out_path = file_name if str(file_name).lower().endswith(ext) else f"{file_name}{ext}"
+
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+
+    engines = {"xlsx": "openpyxl", "ods": "odf"}
+
+    if fmt in ("xlsx", "ods"):
+        with pd.ExcelWriter(
+            out_path,
+            engine=engines[fmt],
+            datetime_format="yyyy-mm-dd hh:mm",
+        ) as writer:
+            df.to_excel(writer, index=use_index, header=use_header)
+
+        """ elif fmt == "ods":
+            with pd.ExcelWriter(out_path, datetime_format="yyyy-mm-dd hh:mm", engine="odf") as writer:
+                df.to_excel(writer, index=use_index, header=use_header) """
+
+    elif fmt == "csv":
+        # ; и utf-8-sig для удобного открытия в Excel
+        df.to_csv(out_path, index=use_index, encoding="utf-8-sig", sep=';', lineterminator="\n",  header=use_header)
+
+    else:
+        raise ValueError(f"Не поддерживаемый формат: {format}. Принимаются: 'xlsx', 'ods', 'csv'.")
+
+    return out_path
+
+
 def sheet_to_list0(file_name_xlsx, format='xlsx'):
     """конвертируем xlsx ods csv в dict"""
 
@@ -153,20 +215,47 @@ def sheet_to_list(file_name, format="xlsx", *, csv_sep=";", csv_encoding="utf-8-
     else:
         raise ValueError(f"Не поддерживаемый формат: {format}. Принимаются: 'xlsx', 'ods', 'csv'.")
 
-    # чтобы пустые тексты не превращались в NaN
-    for col in ("text", "comment"):
-        if col in df2.columns:
-            df2[col] = df2[col].fillna("")
-
     # если есть колонка date - приводим к ISO строке обратно
     if "date" in df2.columns:
-        dt = pd.to_datetime(df2["date"], errors="coerce")
+        df2["date"] = pd.to_datetime(df2["date"], errors="coerce").dt.strftime("%Y-%m-%dT%H:%M:%S")
 
-        # Если нет даты то заполняем ""
-        df2["date"] = dt.dt.strftime("%Y-%m-%dT%H:%M:%S")
-        df2["date"] = df2["date"].fillna("")
+    # Если нет данных то заполняем ""
+    df2 = df2.fillna("")
+
+    # Убираем лишние пробелы на концах
+    for col in df2.columns:
+        if is_string_dtype(df2[col]):
+            df2[col] = df2[col].astype(str).str.strip()
+
+    # Убираем пустые значения
+    first_col = df2.columns[0]
+    df2 = df2[df2[first_col] != ""]
 
     return df2.to_dict(orient="records")
+
+def sheet_to_dict(file_name, format="xlsx", *, csv_sep=";", csv_encoding="utf-8-sig"):
+    fmt = (format or "xlsx").lower().lstrip(".")
+
+    if fmt in ("xlsx", "xlsm", "xls"):
+        df = pd.read_excel(file_name, engine="openpyxl", header=None)
+    elif fmt == "ods":
+        df = pd.read_excel(file_name, engine="odf", header=None)
+    elif fmt == "csv":
+        df = pd.read_csv(file_name, sep=csv_sep, encoding=csv_encoding, header=None)
+    else:
+        raise ValueError(f"Не поддерживаемый формат: {format}. Принимаются: 'xlsx', 'ods', 'csv'.")
+
+    # преобразуем NaN в ""
+    df = df.iloc[:, :2].fillna("")
+
+    # Убираем лишние пробелы на концах
+    df[0] = df[0].astype(str).str.strip()
+    df[1] = df[1].apply(lambda x: x.strip() if isinstance(x, str) else x)
+
+    # Убираем пустые значения
+    df = df[df[0] != ""]
+
+    return dict(zip(df[0].tolist(), df[1].tolist()))
 
 if __name__ == "__main__":
 
