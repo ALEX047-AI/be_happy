@@ -11,6 +11,7 @@ from langchain_core.documents import Document
 import random
 import threading
 import os
+import re
 from datetime import datetime
 
 import joblib
@@ -19,7 +20,28 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 
 from articles import main_articles, support_phrases
+from content import ContentStore
 from options.config import settings
+from language import LanguageStore
+
+# system prompt по умолчанию
+DEFAULT_SYSTEM_PROMPT = (
+            'Ты ассистент эмоциональной поддержки, не человек. Ты {llm_gender} '
+            'Не говори от своего имени. что вы что-то может вместе с пользователем. эмоциональную поддержку могут оказать другие люди, которых упомянул пользователь. '
+            'Но если по контексту подходит напомни, что у человека есть близкие ему люди которые упомянул сам человек и они могут помочь человеку, сделать что-то вместе. '
+            'Ты мягко, бережно и уважительно общаешься с пользователями, которые могут находиться в сложном эмоциональном состоянии. '
+            'Тебе передаётся контекст ответа — используй его как основу, допускается перефразирование и использование синонимов. '
+            'Вопросы пользователю не задавай, дополнительных советов вне переданного контекста не давай. '
+            'Общайся спокойно, поддерживающие и с заботой, избегая резких формулировок и давления. '
+            'События/мероприятия предлагай ТОЛЬКО если пользователь прямо просит или явно намекает, что хочет куда-то сходить/развлечься и не более пяти событий. '
+            'Events содержит информацию в формате json. '
+            "Используй персонализированный ответ на основе данных о человеке.\n\n"
+            "ДАННЫЕ О ЧЕЛОВЕКЕ:\n{human_profile}\n\n"
+            "Context: {context}\n"
+            "Events: {events_context}\n"
+            "Question: {question}"
+            )
+
 
 
 from queue import Queue
@@ -110,7 +132,7 @@ def load_or_train_events_intent_model(model_path: str):
 
 class LLM_IO:
 
-    def __init__(self, human_profile, model_source="openrouter", ai_intro: str=None, shared_data: SharedData = None):
+    def __init__(self, human_profile, model_source="mistral", ai_intro: str=None, shared_data: SharedData = None, lang_chat: str = None, lang_content: str = None, content_dir: str = None, lang_dir: str = None):
 
         self.last_llm_answer = ""
         self.model_source = model_source
@@ -138,6 +160,29 @@ class LLM_IO:
         self.retriever_docs_number = settings.retriever_docs_number
         self.DATA = settings.DATA
         self.USE_LLM = settings.USE_LLM
+
+        # Загружка языков для интервейса и контента для LLM
+        self.lang_chat = (lang_chat or getattr(getattr(settings, "app_options", None), "LANG_CHAT", None) or "ru")
+        self.lang_content = (lang_content or getattr(getattr(settings, "app_options", None), "LANG_CONTENT", None) or self.lang_chat)
+        _content_dir = content_dir or os.path.join(self.DATA, "content")
+        self._content_store = ContentStore(content_dir=_content_dir, default_lang="ru")
+
+        self._lang_store = LanguageStore(lang_dir or os.path.join(self.DATA, "language"), default_lang="ru")
+        self._lang_store.load(self.lang_chat)
+
+        # При ошибке загружаем язык по умолчанию
+        try:
+            _fallback_articles = list(main_articles.keys()) if isinstance(main_articles, dict) else list(main_articles)
+        except Exception:
+            _fallback_articles = []
+        try:
+            _fallback_phrases = list(support_phrases) if isinstance(support_phrases, (list, tuple)) else []
+        except Exception:
+            _fallback_phrases = []
+
+        self._main_articles = self._content_store.get_main_articles(self.lang_chat) or _fallback_articles
+        self._support_phrases = self._content_store.get_support_phrases(self.lang_content) or _fallback_phrases
+        self._system_prompt = self._content_store.get_system_prompt(self.lang_chat, default_prompt=DEFAULT_SYSTEM_PROMPT)
 
         if self.ai_intro is not None and isinstance(self.ai_intro, str):
             self.history.append(AIMessage(content=self.ai_intro))
@@ -193,46 +238,36 @@ class LLM_IO:
         ]"""
 
 
-        self.profile = ', '.join([f'{key} - {value}' for key, value in self.human_profile.items() if value is not None and value != ""])
-        self.request = f'Данные обо мне: {self.profile}'
+        self.profile = self._profile_text()
+        self.request = self.profile
         print(f'{self.request = }')
 
         # self.history = [HumanMessage(content=self.request)]
 
+
+        # основная цепочка
+        self._llm = llm
+        self._build_chain()
+
+        # llm_gender=lambda x: x["llm_gender"],
+        """ chain_no_rag = RunnableParallel(
+            question=lambda data: data
+        ) | prompt_no_rag | llm | StrOutputParser()
+        result = chain_no_rag.invoke("График")
+        print(result) """
+
+    def _build_chain(self):
+        # Загружаем базу знаний для поиска через BM25 retriever
         knowledge_store = [
-            Document(page_content=article) for article in main_articles
+            Document(page_content=article) for article in (self._main_articles or [])
         ]
 
         retriever = BM25Retriever.from_documents(knowledge_store, k=self.retriever_docs_number)
 
-        # Профиль человека теперь в system
+        # забираем system  в зависимости от языка
         prompt = ChatPromptTemplate.from_messages([
-            ("system", (
-            'Ты ассистент эмоциональной поддержки, не человек. Ты {llm_gender} '
-            'Не говори от своего имени. что вы что-то может вместе с пользователем. эмоциональную поддержку могут оказать другие люди, которых упомянул пользователь. '
-            'Но если по контексту подходит напомни, что у человека есть близкие ему люди которые упомянул сам человек и они могут помочь человеку, сделать что-то вместе. '
-            'Ты мягко, бережно и уважительно общаешься с пользователями, которые могут находиться в сложном эмоциональном состоянии. '
-            'Тебе передаётся контекст ответа — используй его как основу, допускается перефразирование и использование синонимов. '
-            'Вопросы пользователю не задавай, дополнительных советов вне переданного контекста не давай. '
-            'Общайся спокойно, поддерживающе и с заботой, избегая резких формулировок и давления. '
-            'События/мероприятия предлагай ТОЛЬКО если пользователь прямо просит или явно намекает, что хочет куда-то сходить/развлечься и не более пяти событий.'
-            'Events содержит информацию в формате json'
-            "Используй персонализированный ответ на основе данных о человеке.\n\n"
-            "ДАННЫЕ О ЧЕЛОВЕКЕ:\n{human_profile}\n\n"
-            "Context: {context}\n"
-            "Events: {events_context}\n"
-            "Question: {question}"
-            )),
+            ("system", self._system_prompt),
             MessagesPlaceholder("history"),
-        ])
-
-        #    "human_profile: {human_profile}"
-        prompt_no_rag = ChatPromptTemplate.from_messages([
-            ("system", (
-                'Ты голосовой ассистент, который обрабатывает информация услышанную от пользователя,'
-            "\nQuestion: {question}"
-                )
-            )
         ])
 
         prnt_msg = RunnableLambda(self.print_messages)
@@ -241,7 +276,6 @@ class LLM_IO:
             strategy="last",
             token_counter=len,
             max_tokens=self.LLM_TRIMMER_MAX_TOKENS,
-            # start_on="human",
             end_on="human",
             include_system=True,
             allow_partial=False,
@@ -253,7 +287,6 @@ class LLM_IO:
             return x
 
         prnt_prompt = RunnableLambda(lambda x: debug_print(x, "AFTER prompt"))
-        prnt_trimmed = RunnableLambda(lambda x: debug_print(x, "AFTER trimmer"))
 
         self.chain = (
             RunnableParallel(
@@ -268,16 +301,41 @@ class LLM_IO:
             | prnt_prompt
             | self.trimmer
             | prnt_msg
-            | llm
+            | self._llm
             | StrOutputParser()
         )
 
-        # llm_gender=lambda x: x["llm_gender"],
-        """ chain_no_rag = RunnableParallel(
-            question=lambda data: data
-        ) | prompt_no_rag | llm | StrOutputParser()
-        result = chain_no_rag.invoke("График")
-        print(result) """
+    def update_languages(self, lang_chat: str | None = None, lang_content: str | None = None):
+        """Обноновляем язык для всего, но чат оставляем (динамически)."""
+        try:
+            if lang_chat:
+                self.lang_chat = (lang_chat or "").strip() or self.lang_chat
+            if lang_content:
+                self.lang_content = (lang_content or "").strip() or self.lang_content
+
+            try:
+                self._lang_store.load(self.lang_chat)
+            except Exception:
+                pass
+
+            try:
+                _fallback_articles = list(main_articles.keys()) if isinstance(main_articles, dict) else list(main_articles)
+            except Exception:
+                _fallback_articles = []
+            try:
+                _fallback_phrases = list(support_phrases) if isinstance(support_phrases, (list, tuple)) else []
+            except Exception:
+                _fallback_phrases = []
+
+            self._main_articles = self._content_store.get_main_articles(self.lang_chat) or _fallback_articles
+            self._support_phrases = self._content_store.get_support_phrases(self.lang_content) or _fallback_phrases
+            self._system_prompt = self._content_store.get_system_prompt(self.lang_chat, default_prompt=DEFAULT_SYSTEM_PROMPT)
+
+            self._build_chain()
+        except Exception:
+            # При ошибке остается предыдущая цепочка
+            pass
+
 
     @property
     def llm_gender(self):
@@ -304,12 +362,34 @@ class LLM_IO:
             self.history.append(AIMessage(content=self.ai_intro))
 
     def _profile_text(self) -> str:
-        profile = ", ".join(
-            f"{k} - {v}"
-            for k, v in self.human_profile.items()
-            if v is not None and str(v).strip() != ""
-        )
-        return profile if profile else "(профиль не заполнен)"
+        """
+        Обработка профиля пользователя для system.
+        в зависимости от значения lang_chat
+        загружаем data/language/<lang>.json.
+        """
+        empty_text = self._lang_store.get("profile.empty", "(профиль не заполнен)")
+        if not isinstance(self.human_profile, dict):
+            return str(self.human_profile) if self.human_profile else empty_text
+
+        fields_map = self._lang_store.get("profile.fields", {}) or {}
+        values_map = self._lang_store.get("profile.values", {}) or {}
+
+        lines = []
+        for k, v in self.human_profile.items():
+            if v is None:
+                continue
+            v_str = str(v).strip()
+            if v_str == "":
+                continue
+
+            label = fields_map.get(k, k)
+
+            if isinstance(v, str):
+                v_str = values_map.get(v, v)
+
+            lines.append(f"{label}: {v_str}")
+
+        return "\n".join(lines) if lines else empty_text
 
     def format_documents(self, documents: list[Document]):
         return "\n\n".join(doc.page_content for doc in documents)
@@ -368,7 +448,7 @@ class LLM_IO:
 
     def get_frase_from_llm(self, question="дай мне совет"):
         if not self.USE_LLM:
-            return random.choice(support_phrases)
+            return random.choice(self._support_phrases)
 
         self.history.append(HumanMessage(content=question))
         result = self.chain.invoke({
@@ -389,6 +469,7 @@ class LLM_IO:
             count = -1
             msg_chunk_packed = ""
             msg_chunk_list = []
+            delims = "\n.!?"
             try:
                 for msg_chunk in self.chain.stream({
                     "question": question,
@@ -398,7 +479,28 @@ class LLM_IO:
                 }):
                     self.last_llm_answer += msg_chunk
                     if isinstance(msg_chunk, str):
-                        msg_chunk_list.append(msg_chunk)
+                        # print(f'{msg_chunk = }') # вывести текущий чанк
+                        parts = re.split(f"([{re.escape(delims)}]+)", msg_chunk, 1)
+                        left_part = right_part = ""
+                        if len(parts) == 1:
+                            msg_chunk_list.append(msg_chunk)
+                        else:
+                            left_part, sep, right_part = parts
+                            left_part = left_part + sep
+                            # if msg_chunk.endswith(('\n', '.', '?', '!')):
+                            msg_chunk_list.append(left_part)
+                            msg_chunk_packed = ''.join(msg_chunk_list)
+                            msg_chunk_packed = msg_chunk_packed.strip(' \n')
+                            if msg_chunk_packed:
+                                count += 1
+                                if not self._text_to_queue_event_pause.is_set():
+                                    self.text_stream_last_queue.put(msg_chunk_packed)
+                                if self.LLM_DEBUG:
+                                    print(f'{count = }, {msg_chunk_packed =  }') #вывести текущее предложение
+                            msg_chunk_list = []
+                            msg_chunk_list.append(right_part)
+                            msg_chunk_packed = ""
+                        """ msg_chunk_list.append(msg_chunk)
                         # print(msg_chunk) # вывести текущий чанк
                         if msg_chunk.endswith(('\n', '.', '?', '!')):
                             msg_chunk_packed = ''.join(msg_chunk_list)
@@ -410,7 +512,7 @@ class LLM_IO:
                                 if self.LLM_DEBUG:
                                     print(f'{count = }, {msg_chunk_packed =  }') #вывести текущее предложение
                             msg_chunk_list = []
-                            msg_chunk_packed = ""
+                            msg_chunk_packed = "" """
                     # print(f'chunk № {count}, {msg_chunk = }')
                     yield msg_chunk
             finally:
@@ -421,7 +523,7 @@ class LLM_IO:
 
 
         else:
-            chunk = random.choice(support_phrases)
+            chunk = random.choice(self._support_phrases)
             self.last_llm_answer = chunk
             yield chunk
 

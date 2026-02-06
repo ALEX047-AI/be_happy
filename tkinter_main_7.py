@@ -5,11 +5,19 @@ TD — Treatment of Depression
 import os
 import random
 from datetime import date
+import time
 
 import matplotlib
 matplotlib.use("TkAgg")
 
 import tkinter as tk
+try:
+    import customtkinter as ctk
+except Exception as _e:
+    raise ImportError(
+        "customtkinter is required for this version. Install it with: pip install customtkinter"
+    ) from _e
+
 from tkinter import messagebox
 from tkinter import filedialog
 
@@ -17,6 +25,8 @@ from queue import Queue
 from dataclasses import dataclass
 
 from options.config import settings, TTS_VOICES, city_list
+from language import LanguageStore
+from content import ContentStore
 from services.city_events import EVENTS_INFO_DYNAMIC, SharedData
 
 from articles import support_phrases
@@ -33,7 +43,7 @@ os.makedirs(DATA, exist_ok=True)
 
 
 
-class TDApp(tk.Tk):
+class TDApp(ctk.CTk):
 
     # BG = settings.BG
     # FG = settings.FG
@@ -54,9 +64,42 @@ class TDApp(tk.Tk):
 
         self.theme_renew(settings.app_options.THEME)
         self.profile = load_profile()
-        self.diary = load_json(DIARY_PATH, [])
+        self.diary = load_json(DIARY_PATH, {})
 
-        self.configure(bg=self.BG)
+        # Загрузка языков
+        self.lang_dir = os.path.join(settings.DATA, "language")
+        self.content_dir = os.path.join(settings.DATA, "content")
+        os.makedirs(self.lang_dir, exist_ok=True)
+        os.makedirs(self.content_dir, exist_ok=True)
+
+        self.lang_ui = getattr(settings.app_options, "LANG_UI", "ru")
+        self.lang_chat = getattr(settings.app_options, "LANG_CHAT", self.lang_ui)
+        self.lang_content = getattr(settings.app_options, "LANG_CONTENT", self.lang_ui)
+
+        self.language = LanguageStore(self.lang_dir, default_lang="ru")
+        self.language.load(self.lang_ui)
+        self.tr = self.language.t
+        self.lang_get = self.language.get
+
+        # В будущем язык интерфейса и ЛЛМ могут быть разными
+        self.language_chat = LanguageStore(self.lang_dir, default_lang="ru")
+        self.language_chat.load(self.lang_chat)
+        self.tr_chat = self.language_chat.t
+
+        # Загружаем статьи, фразы поддержки и системный промпт
+        self.content_store = ContentStore(self.content_dir, default_lang="ru")
+
+
+        # customtkinter база используем fg_color вместо of bg
+        try:
+            if ctk is None:
+                raise RuntimeError('customtkinter is not installed')
+            self._apply_ctk_appearance()
+        except Exception:
+            try:
+                self.configure(bg=self.BG)
+            except Exception:
+                pass
 
         self.create_layout()
 
@@ -86,8 +129,10 @@ class TDApp(tk.Tk):
             self.tts_stream.start()
 
         shared_data = SharedData()
-
-        self.llm_item = LLM_IO(self.profile, settings.MODEL_SOURCE, ai_intro=settings.CHAT_INTRO_TEXT, shared_data=shared_data)
+        start_llm = time.perf_counter()
+        self.llm_item = LLM_IO(self.profile, settings.MODEL_SOURCE, ai_intro=settings.CHAT_INTRO_TEXT, shared_data=shared_data, lang_chat=self.lang_chat, lang_content=self.lang_content, content_dir=self.content_dir, lang_dir=self.lang_dir)
+        est_time_ll = time.perf_counter() - start_llm
+        print(f'{est_time_ll = }')
         self.llm_item.text_stream_last_queue = self.q_text
 
         if settings.USE_EVENTS:
@@ -122,47 +167,34 @@ class TDApp(tk.Tk):
         """
         Делает область scrollable: Canvas + Scrollbar + inner Frame.
         Возвращает (canvas, content_frame).
+        CustomTkinter используем CTkScrollableFrame.
+        Для совместимости временно возвращаем (canvas_or_None, content_frame).
         """
-        outer = tk.Frame(parent, bg=self.BG)
-        outer.pack(fill="both", expand=True)
+        try:
+            sf = ctk.CTkScrollableFrame(parent, fg_color=self.BG, corner_radius=0)
+            sf.pack(fill="both", expand=True)
+            return None, sf
+        except Exception:
+            # совместимость с tkinter
+            outer = tk.Frame(parent, bg=self.BG)
+            outer.pack(fill="both", expand=True)
 
-        canvas = tk.Canvas(outer, bg=self.BG, highlightthickness=0, bd=0)
-        canvas.pack(side="left", fill="both", expand=True)
+            canvas = tk.Canvas(outer, bg=self.BG, highlightthickness=0, bd=0)
+            scrollbar = tk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+            canvas.configure(yscrollcommand=scrollbar.set)
 
-        scroll = tk.Scrollbar(outer, orient="vertical", command=canvas.yview)
-        scroll.pack(side="left", fill="y")
-        canvas.configure(yscrollcommand=scroll.set)
+            scrollbar.pack(side="right", fill="y")
+            canvas.pack(side="left", fill="both", expand=True)
 
-        content = tk.Frame(canvas, bg=self.BG)
-        window_id = canvas.create_window((0, 0), window=content, anchor="nw")
+            content = tk.Frame(canvas, bg=self.BG)
+            win = canvas.create_window((0, 0), window=content, anchor="nw")
 
-        def on_configure(event=None):
-            canvas.configure(scrollregion=canvas.bbox("all"))
+            def _on_configure(event):
+                canvas.configure(scrollregion=canvas.bbox("all"))
+                canvas.itemconfig(win, width=event.width)
 
-        def on_canvas_resize(event):
-            # растягиваем inner frame по ширине canvas
-            canvas.itemconfig(window_id, width=event.width)
-
-        content.bind("<Configure>", on_configure)
-        canvas.bind("<Configure>", on_canvas_resize)
-
-        # колесо мыши (Linux/Windows/macOS)
-        def on_mousewheel(event):
-            # Windows/macOS: event.delta; Linux: Button-4/5
-            if hasattr(event, "delta") and event.delta:
-                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-            else:
-                if event.num == 4:
-                    canvas.yview_scroll(-3, "units")
-                elif event.num == 5:
-                    canvas.yview_scroll(3, "units")
-
-        # чтобы работало когда курсор над страницей
-        outer.bind_all("<MouseWheel>", on_mousewheel)     # Windows/macOS
-        outer.bind_all("<Button-4>", on_mousewheel)       # Linux up
-        outer.bind_all("<Button-5>", on_mousewheel)       # Linux down
-
-        return canvas, content
+            content.bind("<Configure>", _on_configure)
+            return canvas, content
 
     def tk_renew_events(self):
         if settings.USE_EVENTS and self.ivents_renew is not None:
@@ -216,20 +248,47 @@ class TDApp(tk.Tk):
         self.FONT_SIZE = self.theme.FONT_SIZE
         self.FONT_NAME = self.theme.FONT_NAME
 
+
+    def _apply_ctk_appearance(self):
+        """Синхронизируем как выгладет CustomTkinter с выбранной Темой."""
+        try:
+            theme_name = str(getattr(settings.app_options, "THEME", "") or "")
+            name_low = theme_name.lower()
+            if ("тём" in name_low) or ("dark" in name_low):
+                mode = "Dark"
+            elif ("свет" in name_low) or ("light" in name_low):
+                mode = "Light"
+            else:
+                mode = "System"
+            ctk.set_appearance_mode(mode)
+        except Exception:
+            pass
+
     # ЗАПОЛНЕНИЕ ПРИЛОЖЕНИЯ
 
     def create_layout(self):
         self.create_menu()
 
-        self.container = tk.Frame(self, bg=self.BG)
+        # Фон основного контейнера
+        try:
+            self.configure(fg_color=self.BG)
+        except Exception:
+            try:
+                self.configure(bg=self.BG)
+            except Exception:
+                pass
+
+        # Контейнеры страничек
+        self.container = ctk.CTkFrame(self, fg_color=self.BG, corner_radius=0)
         self.container.pack(fill="both", expand=True)
 
         self.frames = {}
         for name in ("home", "chat", "diary", "profile", "options", "about"):
-            frame = tk.Frame(self.container, bg=self.BG)
+            frame = ctk.CTkFrame(self.container, fg_color=self.BG, corner_radius=0)
             frame.place(relx=0, rely=0, relwidth=1, relheight=1)
             self.frames[name] = frame
 
+        # Отрисовываем странички
         self.build_home()
         self.build_chat()
 
@@ -239,11 +298,44 @@ class TDApp(tk.Tk):
             diary=self.diary,
             save_callback=lambda d: save_json(DIARY_PATH, d),
             theme=self.theme,
+            calendar_func=self.open_birthdate_picker,
+            tr=self.tr,
+            lang_get=self.lang_get,
         )
-        # theme={"BG": self.BG, "FG": self.FG, "BTN": self.BTN, "ACCENT": self.ACCENT, "PANEL": self.PANEL},
 
         self.build_profile()
+        self.build_options()
         self.build_about()
+
+    def rebuild_ui(self, keep_page: str | None = None):
+        """Вновь создаем все страницы чтоб прменить Тему и Опции немедленно."""
+        page = keep_page or getattr(self, "_current_frame", "home")
+
+        # Очистка страниц (сохранение объектов Фреймов)
+        for frame in getattr(self, "frames", {}).values():
+            for w in frame.winfo_children():
+                try:
+                    w.destroy()
+                except Exception:
+                    pass
+
+        # Собственно перестраиваем
+        self.build_home()
+        self.build_chat()
+        self.diary_view = DiaryView(
+            parent=self.frames["diary"],
+            diary=self.diary,
+            save_callback=lambda d: save_json(DIARY_PATH, d),
+            theme=self.theme,
+            calendar_func=self.open_birthdate_picker,
+            tr=self.tr,
+            lang_get=self.lang_get,
+        )
+        self.build_profile()
+        self.build_options()
+        self.build_about()
+
+        self.raise_frame(page)
 
 
     # Функции экспорта
@@ -253,7 +345,7 @@ class TDApp(tk.Tk):
             initialfile = f'Профиль {self.profile.get("Имя", "Пользователя")}'
 
         path = filedialog.asksaveasfilename(
-            title="Экспорт профиля",
+            title=self.tr("dlg.export_profile_title","Экспорт профиля"),
             defaultextension=".json",
             initialfile=initialfile,
             filetypes=[("JSON", "*.json")]
@@ -262,9 +354,9 @@ class TDApp(tk.Tk):
             return
         try:
             save_json(path, self.profile)
-            messagebox.showinfo("OK", "Профиль экспортирован.")
+            messagebox.showinfo(self.tr("msg.ok_title","OK"), self.tr("msg.profile_exported","Профиль экспортирован."))
         except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось экспортировать профиль:\n{e}")
+            messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("dlg.export_profile_failed","Не удалось экспортировать профиль:\n{e}", e=e))
 
     def export_profile(self, initialfile=None):
 
@@ -272,7 +364,7 @@ class TDApp(tk.Tk):
             initialfile = f'Профиль {self.profile.get("Имя", "Пользователя")}'
 
         path = filedialog.asksaveasfilename(
-            title="Экспорт профиля",
+            title=self.tr("dlg.export_profile_title","Экспорт профиля"),
             defaultextension=".json",
             initialfile=initialfile,
             filetypes=[
@@ -292,12 +384,12 @@ class TDApp(tk.Tk):
             elif ext in (".xlsx", ".ods", ".csv"):
                 dict_to_sheet(self.profile, path, format=ext)
             else:
-                messagebox.showerror("Ошибка", "Выберите .json .xlsx .ods .csv")
+                messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("dlg.filetype_error","Выберите .json .xlsx .ods .csv"))
                 return
 
-            messagebox.showinfo("OK", "Профиль экспортирован.")
+            messagebox.showinfo(self.tr("msg.ok_title","OK"), self.tr("msg.profile_exported","Профиль экспортирован."))
         except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось экспортировать профиль:\n{e}")
+            messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("dlg.export_profile_failed","Не удалось экспортировать профиль:\n{e}", e=e))
 
     def export_diary0(self, initialfile=None):
         if initialfile is None:
@@ -313,16 +405,16 @@ class TDApp(tk.Tk):
             return
         try:
             save_json(path, self.diary)
-            messagebox.showinfo("OK", "Дневник экспортирован.")
+            messagebox.showinfo(self.tr("msg.ok_title","OK"), self.tr("msg.diary_exported","Дневник экспортирован."))
         except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось экспортировать дневник:\n{e}")
+            messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("dlg.export_diary_failed","Не удалось экспортировать дневник:\n{e}", e=e))
 
     def export_diary(self, initialfile=None):
         if initialfile is None:
             initialfile = f'Дневник {self.profile.get("Имя", "Пользователя")}'
 
         path = filedialog.asksaveasfilename(
-            title="Экспорт дневника (ods csv xlsx json)",
+            title=self.tr("dlg.export_diary_title","Экспорт дневника (ods csv xlsx json)"),
             defaultextension=".json",
             initialfile=initialfile,
             filetypes=[
@@ -341,14 +433,14 @@ class TDApp(tk.Tk):
             if ext == ".json":
                 save_json(path, self.diary)
             elif ext in (".xlsx", ".ods", ".csv"):
-                dict_to_sheet(self.diary, path, format=ext)
+                dict_to_sheet(self.diary, path, format=ext, data_type = 'diary')
             else:
-                messagebox.showerror("Ошибка", "Выберите .json .xlsx .ods .csv")
+                messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("dlg.filetype_error","Выберите .json .xlsx .ods .csv"))
                 return
 
-            messagebox.showinfo("OK", "Дневник экспортирован.")
+            messagebox.showinfo(self.tr("msg.ok_title","OK"), self.tr("msg.diary_exported","Дневник экспортирован."))
         except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось экспортировать дневник:\n{e}")
+            messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("dlg.export_diary_failed","Не удалось экспортировать дневник:\n{e}", e=e))
 
     def update_llm_profile(self):
         # Обновляем LLM profile без потери данных профиля
@@ -389,14 +481,14 @@ class TDApp(tk.Tk):
             except Exception:
                 pass
 
-            messagebox.showinfo("OK", "Профиль импортирован.")
+            messagebox.showinfo(self.tr("msg.ok_title","OK"), self.tr("msg.profile_imported","Профиль импортирован."))
             self.show_profile()
         except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось импортировать профиль:\n{e}")
+            messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("dlg.import_profile_failed","Не удалось импортировать профиль:\n{e}", e=e))
 
     def import_profile(self):
         path = filedialog.askopenfilename(
-            title="Импорт профиля (ods csv xlsx json)",
+            title=self.tr("dlg.import_profile_title","Импорт профиля (ods csv xlsx json)"),
             filetypes=[("Тип файла:", ['*.ods', '*.csv', '*.xlsx', "*.json"])]
         )
         if not path:
@@ -408,7 +500,7 @@ class TDApp(tk.Tk):
             if ext == ".json":
                 data = load_json(path, [])
                 if not isinstance(data, dict):
-                    message = "Файл профиля должен быть формата JSON[dict]"
+                    message = self.tr("msg.profile_import_wrong","Файл профиля должен быть формата JSON[dict].")
                     messagebox.showinfo("OK", message)
                     raise ValueError(message)
             elif ext in (".xlsx", ".xlsm", ".xls", ".ods", ".csv"):
@@ -416,14 +508,14 @@ class TDApp(tk.Tk):
                 if not isinstance(data, dict):
                     raise ValueError("Файл должен быть преобразован в dict.")
             else:
-                messagebox.showerror("Ошибка", "Выберите: ods csv xlsx json")
+                messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("dlg.filetype_error","Выберите: ods csv xlsx json"))
                 return
 
             data_fields_set = set(data)
             profile_fields_set = set(profile_fields)
             diff = data_fields_set - profile_fields_set
             if diff:
-                messagebox.showerror("Ошибка", "Формат данных не соответствует Профилю")
+                messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("msg.profile_format_wrong","Формат данных не соответствует Профилю"))
                 return
             self.profile = data
             save_profile(self.profile)  # так же обновляем данные на диске
@@ -436,10 +528,10 @@ class TDApp(tk.Tk):
             except Exception:
                 pass
 
-            messagebox.showinfo("OK", "Профиль импортирован.")
+            messagebox.showinfo(self.tr("msg.ok_title","OK"), self.tr("msg.profile_imported","Профиль импортирован."))
             self.show_profile()
         except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось импортировать профиль:\n{e}")
+            messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("dlg.import_profile_failed","Не удалось импортировать профиль:\n{e}", e=e))
 
     def import_diary0(self):
         path = filedialog.askopenfilename(
@@ -460,16 +552,16 @@ class TDApp(tk.Tk):
             # обновляем данные о дневнике во вкладке
             if hasattr(self, "diary_view") and self.diary_view is not None:
                 self.diary_view.diary = self.diary
-                self.diary_view.refresh()
+                self.diary_view.refresh_chart()
 
-            messagebox.showinfo("OK", "Дневник импортирован.")
+            messagebox.showinfo(self.tr("msg.ok_title","OK"), self.tr("msg.diary_imported","Дневник импортирован."))
             self.show_diary()
         except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось импортировать дневник:\n{e}")
+            messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("dlg.import_diary_failed","Не удалось импортировать дневник:\n{e}", e=e))
 
     def import_diary(self):
         path = filedialog.askopenfilename(
-            title="Импорт дневника (ods csv xlsx json)",
+            title=self.tr("dlg.import_diary_title","Импорт дневника (ods csv xlsx json)"),
             filetypes=[
                 ("Тип файла:", ['*.ods', '*.csv', '*.xlsx', "*.json"])
             ],
@@ -483,24 +575,24 @@ class TDApp(tk.Tk):
             if ext == ".json":
                 data = load_json(path, [])
                 if not isinstance(data, list):
-                    raise ValueError("Файл дневника должен содержать JSON-массив (list).")
+                    raise ValueError("Файл дневника должен содержать JSON-массив (dict).")
             elif ext in (".xlsx", ".ods", ".csv"):
-                data = sheet_to_list(path, format=ext)
-                if not isinstance(data, list):
-                    raise ValueError("Файл должен быть преобразован в list[dict].")
+                data = sheet_to_dict(path, format=ext, data_type = 'diary')
+                if not isinstance(data, dict):
+                    raise ValueError("Файл должен быть преобразован в dict.")
             else:
-                messagebox.showerror("Ошибка", "Выберите: ods csv xlsx json")
+                messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("dlg.filetype_error","Выберите: ods csv xlsx json"))
                 return
 
             if len(data) == 0:
-                messagebox.showerror("Ошибка", "Формат данных не соответствует Дневнику")
+                messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("msg.diary_format_wrong","Формат данных не соответствует Дневнику"))
                 return
             else:
-                data_fields_set = set(data[0])
+                data_fields_set = set(next(iter(data.values())))
                 diary_fields_set = set(diary_fields)
                 diff = data_fields_set - diary_fields_set
                 if diff:
-                    messagebox.showerror("Ошибка", "Формат данных не соответствует Дневнику")
+                    messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("msg.diary_format_wrong","Формат данных не соответствует Дневнику"))
                     return
 
             self.diary = data
@@ -508,34 +600,34 @@ class TDApp(tk.Tk):
 
             if hasattr(self, "diary_view") and self.diary_view is not None:
                 self.diary_view.diary = self.diary
-                self.diary_view.refresh()
+                self.diary_view.refresh_chart()
 
-            messagebox.showinfo("OK", "Дневник импортирован.")
+            messagebox.showinfo(self.tr("msg.ok_title","OK"), self.tr("msg.diary_imported","Дневник импортирован."))
             self.show_diary()
         except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось импортировать дневник:\n{e}")
+            messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("dlg.import_diary_failed","Не удалось импортировать дневник:\n{e}", e=e))
 
     def create_menu(self):
         menubar = tk.Menu(self)
 
         # Добавляем меню Файл
         file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="Экспорт Профиля", command=self.export_profile)
-        file_menu.add_command(label="Импорт Профиля", command=self.import_profile)
+        file_menu.add_command(label=self.tr("menu.export_profile", "Экспорт Профиля"), command=self.export_profile)
+        file_menu.add_command(label=self.tr("menu.import_profile", "Импорт Профиля"), command=self.import_profile)
         file_menu.add_separator()
-        file_menu.add_command(label="Экспорт Дневника", command=self.export_diary)
-        file_menu.add_command(label="Импорт Дневника", command=self.import_diary)
+        file_menu.add_command(label=self.tr("menu.export_diary", "Экспорт Дневника"), command=self.export_diary)
+        file_menu.add_command(label=self.tr("menu.import_diary", "Импорт Дневника"), command=self.import_diary)
         file_menu.add_separator()
-        file_menu.add_command(label="Выход", underline=0, command=self.destroy)
-        menubar.add_cascade(label="Файл", menu=file_menu)
+        file_menu.add_command(label=self.tr("menu.exit", "Выход"), underline=0, command=self.destroy)
+        menubar.add_cascade(label=self.tr("menu.file", "Файл"), menu=file_menu)
 
         # верхнее меню
-        menubar.add_command(label="Главная", underline=0, command=self.show_home)
-        menubar.add_command(label="Чат поддержки", underline=0, command=self.show_chat)
-        menubar.add_command(label="Дневник", underline=0, command=self.show_diary)
-        menubar.add_command(label="Профиль", underline=0, command=self.show_profile)
-        menubar.add_command(label="Настройки", underline=0, command=self.show_options)
-        menubar.add_command(label="О проекте", underline=0, command=self.show_about)
+        menubar.add_command(label=self.tr("menu.home", "Главная"), underline=0, command=self.show_home)
+        menubar.add_command(label=self.tr("menu.chat", "Чат поддержки"), underline=0, command=self.show_chat)
+        menubar.add_command(label=self.tr("menu.diary", "Дневник"), underline=0, command=self.show_diary)
+        menubar.add_command(label=self.tr("menu.profile", "Профиль"), underline=0, command=self.show_profile)
+        menubar.add_command(label=self.tr("menu.options", "Настройки"), underline=0, command=self.show_options)
+        menubar.add_command(label=self.tr("menu.about", "О проекте"), underline=0, command=self.show_about)
 
         self.config(menu=menubar)
 
@@ -592,6 +684,7 @@ class TDApp(tk.Tk):
             return "break" """
 
     def raise_frame(self, name):
+        self._current_frame = name
         self.frames[name].tkraise()
 
     # вспомогательные функции для процесса стримминга текста в окнах приложения
@@ -636,64 +729,75 @@ class TDApp(tk.Tk):
 
     def build_home(self):
         f = self.frames["home"]
+        for w in f.winfo_children():
+            try:
+                w.destroy()
+            except Exception:
+                pass
 
-        tk.Label(
-            f, text=settings.MAIN_SLOGAN, fg=self.FG, bg=self.BG,
-            font=("Arial", 22, "bold")
-        ).pack(pady=30)
+        # Фон страницы
+        try:
+            f.configure(fg_color=self.BG)
+        except Exception:
+            pass
 
-        self.quote_var = tk.StringVar(value=random.choice(support_phrases))
-
-        tk.Label(
-            f, textvariable=self.quote_var, wraplength=600,
-            fg=self.FG, bg=self.BG, font=(self.FONT_NAME, self.FONT_SIZE)
-        ).pack(pady=20)
-
-        def refresh_quote(stream=settings.USE_STREAM):
-            if settings.USE_LLM:
-                try:
-                    if not stream:
-                        self.quote_var.set(self.llm_item.get_frase_from_llm())
-                        return
-
-                    self.quote_var.set("")
-                    gen = self.llm_item.get_frase_from_llm_stream()
-
-                    total = {"text": ""}
-
-                    def on_chunk(chunk):
-                        total["text"] += chunk
-                        self.quote_var.set(total["text"])
-
-                    def on_done():
-                        pass
-
-                    def on_error(e):
-                        # ошибка fallback
-                        self.quote_var.set(random.choice(support_phrases))
-
-                    self.start_stream(gen, on_chunk, on_done, on_error)
-                    return
-                except Exception:
-                    pass
-
-            self.quote_var.set(random.choice(support_phrases))
-
-        tk.Button(
+        ctk.CTkLabel(
             f,
-            text=settings.MAIN_BTN_TEXT,
-            # command=refresh_quote,
+            text=self.tr("home.slogan", settings.MAIN_SLOGAN),
+            font=(self.FONT_NAME, 22, "bold"),
+            text_color=self.FG,
+        ).pack(pady=(28, 18), padx=20)
+
+        self._home_quote = random.choice(self.content_store.get_support_phrases(self.lang_content) or support_phrases)
+        self.quote_label = ctk.CTkLabel(
+            f,
+            text=self._home_quote,
+            wraplength=720,
+            justify="center",
+            font=(self.FONT_NAME, self.FONT_SIZE),
+            text_color=self.FG,
+        )
+        self.quote_label.pack(pady=(0, 16), padx=24)
+
+        def refresh_quote():
+            # меняем фразу случайным образом.
+            phrase = random.choice(self.content_store.get_support_phrases(self.lang_content) or support_phrases)
+            self._home_quote = phrase
+            try:
+                self.quote_label.configure(text=phrase)
+            except Exception:
+                pass
+
+        ctk.CTkButton(
+            f,
+            text=self.tr("home.main_button", settings.MAIN_BTN_TEXT),
             command=self.show_chat_and_get_answer,
-            bg=self.ACCENT, fg="white", relief="flat",
-            padx=10, pady=6
-        ).pack(pady=10)
+            fg_color=self.ACCENT,
+            hover_color=self.ACCENT,
+            text_color=self.FG,
+            corner_radius=10,
+            height=38,
+        ).pack(pady=(8, 10))
 
-        tk.Label(
+        ctk.CTkButton(
             f,
-            text=settings.MAIN_LABEL_TEXT,
-            fg=self.LABEL_FG, bg=self.BG, font=("Arial", 10),
-            justify="center"
-        ).pack(pady=40)
+            text=self.tr("home.new_phrase", "Новая фраза"),
+            command=refresh_quote,
+            fg_color=self.BTN,
+            hover_color=self.ACTIVE_BG,
+            text_color=self.FG,
+            corner_radius=10,
+            height=34,
+        ).pack(pady=(0, 8))
+
+        ctk.CTkLabel(
+            f,
+            text=self.tr("home.disclaimer", settings.MAIN_LABEL_TEXT),
+            font=(self.FONT_NAME, 10),
+            text_color=self.LABEL_FG,
+            wraplength=720,
+            justify="center",
+        ).pack(pady=(24, 10), padx=24)
 
     def show_home(self):
         self.raise_frame("home")
@@ -702,108 +806,195 @@ class TDApp(tk.Tk):
     # ДНЕВНИК
 
     def show_diary(self):
-        self.diary_view.refresh()
+        self.diary_view.refresh_chart()
         self.raise_frame("diary")
+
 
     # ЧАТ
 
+    # Вспомогательные функции для Чата textbox
+
+    def _chatbox_widget(self):
+        tb = getattr(self, "chat_box", None)
+        if tb is None:
+            return None
+        return getattr(tb, "_textbox", tb)
+
+    def _chatbox_set_state(self, state: str):
+        w = self._chatbox_widget()
+        if w is None:
+            return
+        try:
+            w.configure(state=state)
+        except Exception:
+            try:
+                w.config(state=state)
+            except Exception:
+                pass
+
+    def _chatbox_clear(self):
+        w = self._chatbox_widget()
+        if w is None:
+            return
+        try:
+            w.delete("1.0", "end")
+        except Exception:
+            try:
+                w.delete(0, "end")
+            except Exception:
+                pass
+
+    def _chatbox_insert_end(self, text: str):
+        w = self._chatbox_widget()
+        if w is None:
+            return
+        try:
+            w.insert("end", text)
+        except Exception:
+            try:
+                w.insert(tk.END, text)
+            except Exception:
+                pass
+        try:
+            w.see("end")
+        except Exception:
+            try:
+                w.see(tk.END)
+            except Exception:
+                pass
+
+
     def chat_set_intro(self):
-        self.append_chat(f"{settings.TD_CHAT_PREFIX}{settings.CHAT_INTRO_TEXT}")
+        # self.append_chat(f"{settings.TD_CHAT_PREFIX}{settings.CHAT_INTRO_TEXT}")
+        self.append_chat(f'{self.tr("chat.chat_intro_text", f"{settings.TD_CHAT_PREFIX}{settings.CHAT_INTRO_TEXT}")}')
 
     def renew_chat(self, clean_llm_history=True):
-        self.chat_box.config(state="normal")
-        self.chat_box.delete("1.0", tk.END)
+        # Очитсить Чат
+        self._chatbox_set_state("normal")
+        self._chatbox_clear()
         self.chat_set_intro()
-        self.chat_box.config(state="disabled")
+        self._chatbox_set_state("disabled")
 
+        # Очищаем историю LLM
         if clean_llm_history and \
             hasattr(self, "llm_item") and self.llm_item is not None:
                 self.llm_item.clear_history()
 
-        # self.tts_stream.stop_generation()
+
         self.player_stop()
         self.player_resume()
-        # self.tts_stream_resume()
 
     def build_chat(self):
         f = self.frames["chat"]
+        for w in f.winfo_children():
+            try:
+                w.destroy()
+            except Exception:
+                pass
 
-        tk.Label(
-            f, text="Чат поддержки", fg=self.FG, bg=self.BG,
-            font=("Arial", 18, "bold")
-        ).pack(pady=20)
+        # Фон страницы
+        try:
+            f.configure(fg_color=self.BG)
+        except Exception:
+            pass
 
-        self.chat_box = tk.Text(
-            f, height=20, width=80,
-            bg=self.PANEL, fg=self.FG, insertbackground=self.FG,
-            relief="flat", wrap="word"
+        ctk.CTkLabel(
+            f,
+            text=self.tr("chat.title","Чат поддержки"),
+            font=(self.FONT_NAME, 18, "bold"),
+            text_color=self.FG,
+        ).pack(pady=(16, 8))
+
+        # Собственно весь текст Чата
+        self.chat_box = ctk.CTkTextbox(
+            f,
+            width=900,
+            height=380,
+            fg_color=self.PANEL,
+            text_color=self.FG,
+            corner_radius=10,
         )
-        self.chat_box.pack(padx=20, pady=10)
-        self.chat_box.config(state="disabled")
+        self.chat_box.pack(padx=20, pady=(0, 12), fill="both", expand=True)
+        self._chatbox_set_state("disabled")
 
-        self.user_entry = tk.Entry(
-            f, width=60,
-            bg=self.BTN, fg=self.FG, insertbackground=self.FG,
-            relief="flat"
+        # Ввод вопроса пользователем
+        self.user_entry = ctk.CTkEntry(
+            f,
+            height=40,
+            fg_color=self.BTN,
+            text_color=self.FG,
+            corner_radius=10,
+            placeholder_text=self.tr("chat.placeholder","Введите сообщение…"),
         )
-
-        self.user_entry.pack(pady=10)
+        self.user_entry.pack(padx=20, pady=(0, 12), fill="x")
         self.user_entry.bind("<Return>", lambda e: self.send_message())
 
-        # Делаем новый фрейм для кнопок
-        btn_row = tk.Frame(f, bg=self.BG)
-        btn_row.pack(pady=(0, 10), fill="x")
+        # Делаем новый фрейм для кнопок: два блока
+        btn_area = ctk.CTkFrame(f, fg_color="transparent")
+        btn_area.pack(padx=20, pady=(0, 14), fill="x")
 
-        tk.Label(btn_row, bg=self.BG, text="").pack(side="left", expand=True)
+        # 1й блок - отправить/очистить
+        block1 = ctk.CTkFrame(btn_area, fg_color="transparent")
+        block1.pack(fill="x")
 
-        self.send_btn = tk.Button(
-            btn_row, text="Отправить",
-            command=self.send_message,
-            bg=self.ACCENT, fg="white",
-            relief="flat", padx=10, pady=6
-        )
-        self.send_btn.pack(side="left", padx=5)
+        block1.grid_columnconfigure(0, weight=1)
+        block1.grid_columnconfigure(1, weight=1)
 
-        self.clear_btn = tk.Button(
-            btn_row, text="Очистить чат",
-            command=self.renew_chat,
-            bg=self.ACCENT, fg="white",
-            relief="flat", padx=10, pady=6
-        )
-        self.clear_btn.pack(side="left", padx=5)
+        def mk_btn(parent, text, cmd, *, kind="primary", font=None, width=None):
+            kw = dict(
+                master=parent,
+                text=text,
+                command=cmd,
+                corner_radius=10,
+                height=38,
+            )
+            if width is not None:
+                kw["width"] = width
+            if font is not None:
+                kw["font"] = font
 
-        # Кнопки управление аудио
+            btn = ctk.CTkButton(**kw)
+            if kind == "primary":
+                btn.configure(fg_color=self.ACCENT, hover_color=self.ACCENT, text_color=self.FG)
+            else:
+                btn.configure(fg_color=self.BTN, hover_color=self.ACTIVE_BG, text_color=self.FG)
+            return btn
 
-        self.pause_btn = tk.Button(
-            btn_row, text="Пауза",
-            command=self.player_pause,
-            bg=self.ACCENT, fg="white",
-            relief="flat", padx=10, pady=6
-        )
-        self.pause_btn.pack(side="left", padx=5)
-        Hovertip(self.pause_btn, 'Проджить воспроизведение', hover_delay=500)
+        self.send_btn  = mk_btn(block1, self.tr("buttons.send","Отправить"), self.send_message, kind="primary")
+        self.clear_btn = mk_btn(block1, self.tr("buttons.clear","Очистить"), self.renew_chat, kind="secondary")
+        self.send_btn.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.clear_btn.grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
-        self.resume_btn = tk.Button(
-            btn_row, text="Продолжить",
-            command=self.player_resume,
-            bg=self.ACCENT, fg="white",
-            relief="flat", padx=10, pady=6
-        )
-        self.resume_btn.pack(side="left", padx=5)
-        Hovertip(self.resume_btn, 'Проджить воспроизведение', hover_delay=500)
+        # 2й блок - контрль плеера.
+        block2 = ctk.CTkFrame(btn_area, fg_color="transparent")
+        block2.pack(fill="x", pady=(10, 0))
 
-        self.stop_btn = tk.Button(
-            btn_row, text="Стоп",
-            command=self.player_stop,
-            bg=self.ACCENT, fg="white",
-            relief="flat", padx=10, pady=6
-        )
-        self.stop_btn.pack(side="left", padx=5)
-        # Добавить всплывающую подсказку к кнопке
-        Hovertip(self.stop_btn, 'Продолжит воспроизведение только после нового ответа', hover_delay=500)
+        block2.grid_columnconfigure((0, 1, 2), weight=1)
 
+        icon_font = (self.FONT_NAME, 18, "bold")
+        self.pause_btn  = mk_btn(block2, "⏸", self.player_pause, kind="primary", font=icon_font, width=52)
+        self.resume_btn = mk_btn(block2, "▶", self.player_resume, kind="primary", font=icon_font, width=52)
+        self.stop_btn   = mk_btn(block2, "⏹", self.player_stop, kind="primary", font=icon_font, width=52)
 
-        tk.Label(btn_row, bg=self.BG, text="").pack(side="left", expand=True)
+        # Уменьшаем высоту кнопочек
+        for b in (self.pause_btn, self.resume_btn, self.stop_btn):
+            try:
+                b.configure(height=34)
+            except Exception:
+                pass
+
+        self.pause_btn.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.resume_btn.grid(row=0, column=1, sticky="ew", padx=8)
+        self.stop_btn.grid(row=0, column=2, sticky="ew", padx=(8, 0))
+
+        # Всплывающие подсказки
+        try:
+            Hovertip(self.clear_btn,  "Очистка чата и истории общения.", hover_delay=500)
+            Hovertip(self.pause_btn,  "Приостановить воспроизведение", hover_delay=500)
+            Hovertip(self.resume_btn, "Продолжить воспроизведение", hover_delay=500)
+            Hovertip(self.stop_btn,   "Продолжит воспроизведение только после нового ответа", hover_delay=500)
+        except Exception:
+            pass
 
         self.chat_set_intro()
 
@@ -879,28 +1070,27 @@ class TDApp(tk.Tk):
             elif "не знаю" in lower:
                 response = "Это нормально — не знать. Давай начнём с малого: что ты чувствуешь в данный момент?"
             else:
-                response = random.choice(support_phrases)
+                response = random.choice(self.content_store.get_support_phrases(self.lang_chat) or support_phrases)
 
             self.append_chat(f"{settings.TD_CHAT_PREFIX}{response}\n")
 
     def append_chat(self, text):
-        # if getattr(self, 'chat_box'):
-        self.chat_box.config(state="normal")
-        self.chat_box.insert(tk.END, text)
-        self.chat_box.see(tk.END)
-        self.chat_box.config(state="disabled")
+        self._chatbox_set_state("normal")
+        self._chatbox_insert_end(text)
+        self._chatbox_set_state("disabled")
 
     def show_chat(self):
         self.raise_frame("chat")
-        self.chat_box.config(state="disabled")
+        self._chatbox_set_state("disabled")
         self.user_entry.focus_set()
 
     def show_chat_and_get_answer(self):
         self.raise_frame("chat")
-        self.chat_box.config(state="disabled")
+        self._chatbox_set_state("disabled")
         self.user_entry.focus_set()
         delay_ms = 10
         self.after(delay_ms, lambda: self.send_message(default_msg='Дай мне совет'))
+
 
     # ПРОФИЛЬ
 
@@ -908,182 +1098,281 @@ class TDApp(tk.Tk):
         f = self.frames["profile"]
 
         for w in f.winfo_children():
-            w.destroy()
+            try:
+                w.destroy()
+            except Exception:
+                pass
+
+        # Фон страницы
+        try:
+            f.configure(fg_color=self.BG)
+        except Exception:
+            pass
+
+        ctk.CTkLabel(
+            f,
+            text=self.tr("profile.title","Профиль"),
+            font=(self.FONT_NAME, 18, "bold"),
+            text_color=self.FG,
+        ).pack(pady=(16, 8))
 
         # делаем страницу профиля полностью scrollable
-        self.profile_canvas, content = self.make_scrollable(f)
+        _, content = self.make_scrollable(f)
 
-        tk.Label(
-            content, text="Профиль", fg=self.FG, bg=self.BG,
-            font=("Arial", 18, "bold")
-        ).pack(pady=20)
+        # Опции в профиле
+        fields_map = self.lang_get("profile.fields", {}) or {}
+        values_map = self.lang_get("profile.values", {}) or {}
+        cities_map = self.lang_get("profile.cities", {}) or {}
 
-        def normalize(value: str, allowed: tuple[str, ...]) -> str:
-            value = (value or "").strip()
-            return value if value in allowed else ""
+        def fld(k: str) -> str:
+            return fields_map.get(k, k)
 
-        RADIO_BTN = dict(
-            indicatoron=0,
-            bg=self.BTN,
-            fg=self.FG,
-            activebackground=self.ACTIVE_BG,
-            activeforeground=self.FG,
-            selectcolor=self.ACCENT,
-            relief="flat",
-            padx=10,
-            pady=6,
-            borderwidth=0,
-            highlightthickness=0,
-        )
+        def val(v: str) -> str:
+            return values_map.get(v, v)
+
+        gender_ru = ("Мужской", "Женский")
+        marital_ru = ("Холост / Не замужем", "Женат / Замужем")
+        yesno_ru = ("Да", "Нет")
+
+        gender_list = tuple(val(x) for x in gender_ru)
+        marital_list = tuple(val(x) for x in marital_ru)
+        yesno_list = tuple(val(x) for x in yesno_ru)
+
+        # Сверяем отображаемые и сохраненные значения
+        self._profile_value_to_ru = {val(x): x for x in (list(gender_ru) + list(marital_ru) + list(yesno_ru))}
+
+        city_allowed = tuple(city_list)
+
+        def city_disp(c: str) -> str:
+            if self.lang_ui == "ru":
+                return c
+            d = cities_map.get(c)
+            if isinstance(d, str) and d.strip():
+                return d
+            return self._transliterate_ru(c)
+
+        city_display_values = [city_disp(c) for c in city_allowed]
+        self._profile_city_display_to_ru = {city_disp(c): c for c in city_allowed}
 
         self.name_var = tk.StringVar(value=str(self.profile.get("Имя", "")))
-        self.gender_var = tk.StringVar(value=normalize(self.profile.get("Пол", ""), ("Мужской", "Женский")))
-        self.city_var = tk.StringVar(value=normalize(self.profile.get("Город", ""), tuple(city_list)))
+
+        # Сохраняем настроки профиля RU; Показываем перевод
+        gender_ru_val = self.normalize_text_for_ui(self.profile.get("Пол", ""), gender_ru)
+        self.gender_var = tk.StringVar(value=val(gender_ru_val))
+
+        city_ru_val = self.normalize_text_for_ui(self.profile.get("Город", ""), city_allowed)
+        self.city_var = tk.StringVar(value=city_disp(city_ru_val))
+
         self.birth_var = tk.StringVar(value=str(self.profile.get("Дата рождения", "")))
-        self.marital_var = tk.StringVar(
-            value=normalize(self.profile.get("Семейное положение", ""), ("Холост / Не замужем", "Женат / Замужем"))
-        )
-        self.parents_var = tk.StringVar(value=normalize(self.profile.get("Родители", ""), ("Да", "Нет")))
-        self.friends_var = tk.StringVar(value=normalize(self.profile.get("Друзья", ""), ("Да", "Нет")))
+
+        marital_ru_val = self.normalize_text_for_ui(self.profile.get("Семейное положение", ""), marital_ru)
+        self.marital_var = tk.StringVar(value=val(marital_ru_val))
+
+        parents_ru_val = self.normalize_text_for_ui(self.profile.get("Родители", ""), yesno_ru)
+        self.parents_var = tk.StringVar(value=val(parents_ru_val))
+
+        friends_ru_val = self.normalize_text_for_ui(self.profile.get("Друзья", ""), yesno_ru)
+        self.friends_var = tk.StringVar(value=val(friends_ru_val))
 
         try:
             children_default = int(self.profile.get("Дети", 0))
         except Exception:
             children_default = 0
-        self.children_var = tk.IntVar(value=max(0, min(10, children_default)))
+        children_default = max(0, min(10, children_default))
+        self.children_var = tk.IntVar(value=children_default)
 
-        comment_default = str(self.profile.get("Комментарий", ""))
-        pets_default = str(self.profile.get("Домашние животные", ""))
-        hobby_default = str(self.profile.get("Хобби, интересы", ""))
+        form = ctk.CTkFrame(content, fg_color="transparent")
+        form.pack(padx=20, pady=10, fill="x")
 
-        # form = tk.Frame(f, bg=self.BG)
-        form = tk.Frame(content, bg=self.BG)
-        form.pack(pady=10)
+        form.grid_columnconfigure(0, weight=0)
+        form.grid_columnconfigure(1, weight=1)
 
         def label(row, text):
-            tk.Label(form, text=text + ":", fg=self.FG, bg=self.BG, anchor="w", width=25)\
-                .grid(row=row, column=0, sticky="w", padx=5, pady=6)
+            ctk.CTkLabel(
+                form,
+                text=text + ":",
+                text_color=self.FG,
+                anchor="w",
+                justify="left",
+            ).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=6)
 
-        label(0, "Имя")
-        tk.Entry(form, textvariable=self.name_var, width=40, bg=self.BTN, fg=self.FG, insertbackground=self.FG, relief="flat")\
-            .grid(row=0, column=1, sticky="w", padx=5, pady=6)
+        label(0, fld("Имя"))
+        ctk.CTkEntry(
+            form,
+            textvariable=self.name_var,
+            fg_color=self.BTN,
+            text_color=self.FG,
+            height=34,
+            corner_radius=10,
+        ).grid(row=0, column=1, sticky="ew", pady=6)
 
-        label(1, "Пол")
-        gender_frame = tk.Frame(form, bg=self.BG)
-        gender_frame.grid(row=1, column=1, sticky="w", padx=5, pady=6)
-        tk.Radiobutton(gender_frame, text="Мужской", variable=self.gender_var, value="Мужской", **RADIO_BTN)\
-            .pack(side="left", padx=(0, 10))
-        tk.Radiobutton(gender_frame, text="Женский", variable=self.gender_var, value="Женский", **RADIO_BTN)\
-            .pack(side="left")
+        label(1, fld("Пол"))
+        gender_frame = ctk.CTkFrame(form, fg_color="transparent")
+        gender_frame.grid(row=1, column=1, sticky="w", pady=6)
+        for i, g in enumerate(gender_list):
+            ctk.CTkRadioButton(
+                gender_frame,
+                text=g,
+                variable=self.gender_var,
+                value=g,
+                text_color=self.FG,
+                fg_color=self.ACCENT,
+            ).grid(row=0, column=i, padx=(0, 16))
 
-        label(2, "Город")
-        city_frame = tk.Frame(form, bg=self.BG)
-        city_frame.grid(row=2, column=1, sticky="w", padx=5, pady=6)
+        label(2, fld("Город"))
+        try:
+            self.city_menu = ctk.CTkOptionMenu(
+                form,
+                values=list(city_display_values) if city_allowed else [""],
+                variable=self.city_var,
+            )
+            self.city_menu.configure(
+                fg_color=self.BTN,
+                button_color=self.ACCENT,
+                button_hover_color=self.ACCENT,
+                text_color=self.FG,
+                dropdown_fg_color=self.PANEL,
+                dropdown_hover_color=self.ACTIVE_BG,
+                dropdown_text_color=self.FG,
+            )
+            self.city_menu.grid(row=2, column=1, sticky="w", pady=6)
+        except Exception:
+            ctk.CTkEntry(
+                form,
+                textvariable=self.city_var,
+                fg_color=self.BTN,
+                text_color=self.FG,
+                height=34,
+                corner_radius=10,
+            ).grid(row=2, column=1, sticky="ew", pady=6)
 
-        # выподающий список городов
-        self.city_menu = tk.OptionMenu(city_frame, self.city_var, *city_list)
-        self.city_menu.config(
-            bg=self.BTN, fg=self.FG, activebackground=self.ACTIVE_BG, activeforeground=self.FG,
-            relief="flat", highlightthickness=0, padx=8, pady=4
+        label(3, fld("Дата рождения"))
+        birth_row = ctk.CTkFrame(form, fg_color="transparent")
+        birth_row.grid(row=3, column=1, sticky="ew", pady=6)
+        birth_row.grid_columnconfigure(0, weight=1)
+
+        self.birth_entry = ctk.CTkEntry(
+            birth_row,
+            textvariable=self.birth_var,
+            fg_color=self.BTN,
+            text_color=self.FG,
+            height=34,
+            corner_radius=10,
         )
-        # настройка выпадающего меню (внутреннее Menu)
-        self.city_menu["menu"].config(
-            bg=self.BTN, fg=self.FG, activebackground=self.ACTIVE_BG, activeforeground=self.FG,
-            relief="flat", borderwidth=0
+        self.birth_entry.grid(row=0, column=0, sticky="ew")
+        try:
+            self.birth_entry.configure(state="readonly")
+        except Exception:
+            pass
+
+        ctk.CTkButton(
+            birth_row,
+            text="📅",
+            width=44,
+            height=34,
+            corner_radius=10,
+            fg_color=self.ACCENT,
+            hover_color=self.ACCENT,
+            text_color=self.FG,
+            command=self.open_birthdate_picker,
+        ).grid(row=0, column=1, padx=(10, 0))
+
+        label(4, fld("Семейное положение"))
+        marital_frame = ctk.CTkFrame(form, fg_color="transparent")
+        marital_frame.grid(row=4, column=1, sticky="w", pady=6)
+        for i, m in enumerate(marital_list):
+            ctk.CTkRadioButton(
+                marital_frame,
+                text=m,
+                variable=self.marital_var,
+                value=m,
+                text_color=self.FG,
+                fg_color=self.ACCENT,
+            ).grid(row=0, column=i, padx=(0, 16))
+
+        label(5, fld("Родители"))
+        parents_frame = ctk.CTkFrame(form, fg_color="transparent")
+        parents_frame.grid(row=5, column=1, sticky="w", pady=6)
+        for i, v in enumerate(yesno_list):
+            ctk.CTkRadioButton(
+                parents_frame,
+                text=v,
+                variable=self.parents_var,
+                value=v,
+                text_color=self.FG,
+                fg_color=self.ACCENT,
+            ).grid(row=0, column=i, padx=(0, 16))
+
+        label(6, fld("Друзья"))
+        friends_frame = ctk.CTkFrame(form, fg_color="transparent")
+        friends_frame.grid(row=6, column=1, sticky="w", pady=6)
+        for i, v in enumerate(yesno_list):
+            ctk.CTkRadioButton(
+                friends_frame,
+                text=v,
+                variable=self.friends_var,
+                value=v,
+                text_color=self.FG,
+                fg_color=self.ACCENT,
+            ).grid(row=0, column=i, padx=(0, 16))
+
+        # Дети (0 - 10)
+        label(7, fld("Дети"))
+        children_row = ctk.CTkFrame(form, fg_color="transparent")
+        children_row.grid(row=7, column=1, sticky="ew", pady=6)
+        children_row.grid_columnconfigure(0, weight=1)
+
+        self.children_slider = ctk.CTkSlider(
+            children_row,
+            from_=0,
+            to=10,
+            number_of_steps=10,
+            fg_color=getattr(self.theme, "SLIDER_FG", None) or self.ACTIVE_BG,
+            progress_color=getattr(self.theme, "SLIDER_PROGRESS", None) or self.ACCENT,
+            button_color=getattr(self.theme, "SLIDER_BUTTON", None) or self.ACCENT,
+            button_hover_color=getattr(self.theme, "SLIDER_BUTTON", None) or self.ACCENT,
+            command=lambda v: self.children_var.set(int(round(v))),
         )
-        self.city_menu.pack(side="left")
+        self.children_slider.grid(row=0, column=0, sticky="ew")
+        try:
+            self.children_slider.set(children_default)
+        except Exception:
+            pass
 
-        label(3, "Дата рождения")
-        birth_frame = tk.Frame(form, bg=self.BG)
-        birth_frame.grid(row=3, column=1, sticky="w", padx=5, pady=6)
-        tk.Entry(birth_frame, textvariable=self.birth_var, width=20, bg=self.BTN, fg=self.FG, insertbackground=self.FG, relief="flat")\
-            .pack(side="left", padx=(0, 10))
-        tk.Button(birth_frame, text="Выбрать", command=self.open_birthdate_picker,
-                  bg=self.ACCENT, fg="white", relief="flat", padx=10, pady=4)\
-            .pack(side="left")
+        self.children_value_lbl = ctk.CTkLabel(children_row, textvariable=self.children_var, width=40, text_color=self.FG)
+        self.children_value_lbl.grid(row=0, column=1, padx=(10, 0))
 
-        label(4, "Семейное положение")
-        marital_frame = tk.Frame(form, bg=self.BG)
-        marital_frame.grid(row=4, column=1, sticky="w", padx=5, pady=6)
-        tk.Radiobutton(marital_frame, text="Холост / Не замужем", variable=self.marital_var,
-                       value="Холост / Не замужем", **RADIO_BTN).pack(side="left", padx=(0, 10))
-        tk.Radiobutton(marital_frame, text="Женат / Замужем", variable=self.marital_var,
-                       value="Женат / Замужем", **RADIO_BTN).pack(side="left")
+        # Многострочные поля
+        def textbox(row, title, key, height=100):
+            label(row, title)
+            tb = ctk.CTkTextbox(
+                form,
+                height=height,
+                fg_color=self.PANEL,
+                text_color=self.FG,
+                corner_radius=10,
+            )
+            tb.grid(row=row, column=1, sticky="ew", pady=6)
+            tb.insert("1.0", str(self.profile.get(key, "")))
+            return tb
 
-        label(5, "Родители")
-        parents_frame = tk.Frame(form, bg=self.BG)
-        parents_frame.grid(row=5, column=1, sticky="w", padx=5, pady=6)
-        tk.Radiobutton(parents_frame, text="Да", variable=self.parents_var, value="Да", **RADIO_BTN)\
-            .pack(side="left", padx=(0, 10))
-        tk.Radiobutton(parents_frame, text="Нет", variable=self.parents_var, value="Нет", **RADIO_BTN)\
-            .pack(side="left")
+        self.pets_text = textbox(8, fld("Домашние животные"), "Домашние животные", 90)
+        self.hobby_text = textbox(9, fld("Хобби, интересы"), "Хобби, интересы", 90)
+        self.comment_text = textbox(10, fld("Комментарий"), "Комментарий", 120)
 
-        label(6, "Дети")
-        tk.Spinbox(form, from_=0, to=10, textvariable=self.children_var,
-                   width=5, bg=self.BTN, fg=self.FG, insertbackground=self.FG, relief="flat", buttonbackground=self.BTN)\
-            .grid(row=6, column=1, sticky="w", padx=5, pady=6)
-
-        label(7, "Друзья")
-        friends_frame = tk.Frame(form, bg=self.BG)
-        friends_frame.grid(row=7, column=1, sticky="w", padx=5, pady=6)
-        tk.Radiobutton(friends_frame, text="Да", variable=self.friends_var, value="Да", **RADIO_BTN)\
-            .pack(side="left", padx=(0, 10))
-        tk.Radiobutton(friends_frame, text="Нет", variable=self.friends_var, value="Нет", **RADIO_BTN)\
-            .pack(side="left")
-
-        label(8, "Домашние животные")
-        pets_frame = tk.Frame(form, bg=self.BG)
-        pets_frame.grid(row=8, column=1, sticky="w", padx=5, pady=6)
-
-        self.pets_text = tk.Text(
-            pets_frame, width=40, height=3, bg=self.PANEL, fg=self.FG,
-            insertbackground=self.FG, relief="flat", wrap="word"
-        )
-        self.pets_text.pack(side="left")
-        self.pets_text.insert("1.0", pets_default)
-        pets_scroll = tk.Scrollbar(pets_frame, command=self.pets_text.yview)
-        pets_scroll.pack(side="left", fill="y", padx=(6, 0))
-        self.pets_text.configure(yscrollcommand=pets_scroll.set)
-
-        label(9, "Хобби, интересы")
-        hobby_frame = tk.Frame(form, bg=self.BG)
-        hobby_frame.grid(row=9, column=1, sticky="w", padx=5, pady=6)
-
-        self.hobby_text = tk.Text(
-            hobby_frame, width=40, height=3, bg=self.PANEL, fg=self.FG,
-            insertbackground=self.FG, relief="flat", wrap="word"
-        )
-        self.hobby_text.pack(side="left")
-        self.hobby_text.insert("1.0", hobby_default)
-
-        hobby_scroll = tk.Scrollbar(hobby_frame, command=self.hobby_text.yview)
-        hobby_scroll.pack(side="left", fill="y", padx=(6, 0))
-        self.hobby_text.configure(yscrollcommand=hobby_scroll.set)
-
-        label(10, "Комментарий")
-        comment_frame = tk.Frame(form, bg=self.BG)
-        comment_frame.grid(row=10, column=1, sticky="w", padx=5, pady=6)
-
-        self.comment_text = tk.Text(
-            comment_frame, width=40, height=5, bg=self.PANEL, fg=self.FG,
-            insertbackground=self.FG, relief="flat", wrap="word"
-        )
-        self.comment_text.pack(side="left")
-        self.comment_text.insert("1.0", comment_default)
-
-        scroll = tk.Scrollbar(comment_frame, command=self.comment_text.yview)
-        scroll.pack(side="left", fill="y", padx=(6, 0))
-        self.comment_text.configure(yscrollcommand=scroll.set)
-
-        tk.Button(
-            # f, text="Сохранить профиль",
-            content, text="Сохранить профиль",
+        ctk.CTkButton(
+            content,
+            text=self.tr("profile.save_button","Сохранить профиль"),
             command=self.save_profile_data,
-            bg=self.ACCENT, fg="white", relief="flat",
-            padx=10, pady=6
-        ).pack(pady=20)
+            fg_color=self.ACCENT,
+            hover_color=self.ACCENT,
+            text_color=self.FG,
+            corner_radius=10,
+            height=38,
+        ).pack(pady=(14, 18))
 
-    def open_birthdate_picker(self):
+
+    def open_birthdate_picker_0(self):
         top = tk.Toplevel(self)
         top.title("Выбор даты рождения")
         top.configure(bg=self.BG)
@@ -1142,7 +1431,7 @@ class TDApp(tk.Tk):
             dd = int(day_var.get())
 
             if not is_valid_date(yy, mm, dd):
-                messagebox.showerror("Ошибка", "Некорректная дата.")
+                messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("msg.invalid_date","Некорректная дата."))
                 return
 
             self.birth_var.set(f"{yy:04d}-{mm:02d}-{dd:02d}")
@@ -1151,7 +1440,89 @@ class TDApp(tk.Tk):
         btns = tk.Frame(top, bg=self.BG)
         btns.grid(row=3, column=0, columnspan=2, pady=(5, 12))
 
-        tk.Button(btns, text="OK", command=set_date, bg=self.ACCENT, fg="white", relief="flat", padx=14, pady=6)\
+        tk.Button(btns, text="OK", command=set_date, bg=self.ACCENT, fg=self.FG, relief="flat", padx=14, pady=6)\
+            .pack(side="left", padx=8)
+        tk.Button(btns, text="Отмена", command=top.destroy, bg=self.BTN, fg=self.FG, relief="flat", padx=14, pady=6)\
+            .pack(side="left", padx=8)
+
+    def open_birthdate_picker(self, title="Выбор даты", year_min=1900, year_max_shift=10, check_more_then_today=True, current=None, callback=None):
+        top = tk.Toplevel(self)
+        top.title(title)
+        top.configure(bg=self.BG)
+        top.resizable(False, False)
+        top.grab_set()
+
+        today = date.today()
+        # year_min = year_min
+        if year_max_shift < 0:
+            year_max_shift = 0
+        year_max = today.year - year_max_shift
+
+        y, m, d = today.year, today.month, today.day
+        if current is None:
+            cur = self.birth_var.get().strip()
+            try:
+                parts = cur.split("-")
+                if len(parts) == 3:
+                    y = int(parts[0])
+                    m = int(parts[1])
+                    d = int(parts[2])
+            except Exception:
+                pass
+        elif isinstance(current, date):
+            y, m, d = current.year, current.month, current.day
+
+        y = max(year_min, min(year_max, y))
+        m = max(1, min(12, m))
+        d = max(1, min(31, d))
+
+        tk.Label(top, text="Год:", fg=self.FG, bg=self.BG).grid(row=0, column=0, padx=10, pady=10, sticky="e")
+        tk.Label(top, text="Месяц:", fg=self.FG, bg=self.BG).grid(row=1, column=0, padx=10, pady=10, sticky="e")
+        tk.Label(top, text="День:", fg=self.FG, bg=self.BG).grid(row=2, column=0, padx=10, pady=10, sticky="e")
+
+        year_var = tk.IntVar(value=y)
+        month_var = tk.IntVar(value=m)
+        day_var = tk.IntVar(value=d)
+
+        tk.Spinbox(top, from_=year_min, to=year_max, textvariable=year_var, width=8,
+                   bg=self.BTN, fg=self.FG, insertbackground=self.FG, relief="flat")\
+            .grid(row=0, column=1, padx=10, pady=10, sticky="w")
+
+        tk.Spinbox(top, from_=1, to=12, textvariable=month_var, width=8,
+                   bg=self.BTN, fg=self.FG, insertbackground=self.FG, relief="flat")\
+            .grid(row=1, column=1, padx=10, pady=10, sticky="w")
+
+        tk.Spinbox(top, from_=1, to=31, textvariable=day_var, width=8,
+                   bg=self.BTN, fg=self.FG, insertbackground=self.FG, relief="flat")\
+            .grid(row=2, column=1, padx=10, pady=10, sticky="w")
+
+        def is_valid_date(yy, mm, dd, check_more_then_today=check_more_then_today):
+            try:
+                new_date = date(yy, mm, dd)
+                if check_more_then_today and new_date > today:
+                    return False
+                return True
+            except Exception:
+                return False
+
+        def set_date(callback=callback):
+            yy = int(year_var.get())
+            mm = int(month_var.get())
+            dd = int(day_var.get())
+
+            if not is_valid_date(yy, mm, dd):
+                messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("msg.invalid_date","Некорректная дата."))
+                return
+            if callback is None:
+                self.birth_var.set(f"{yy:04d}-{mm:02d}-{dd:02d}")
+            else:
+                callback(date(yy, mm, dd))
+            top.destroy()
+
+        btns = tk.Frame(top, bg=self.BG)
+        btns.grid(row=3, column=0, columnspan=2, pady=(5, 12))
+
+        tk.Button(btns, text="OK", command=set_date, bg=self.ACCENT, fg=self.FG, relief="flat", padx=14, pady=6)\
             .pack(side="left", padx=8)
         tk.Button(btns, text="Отмена", command=top.destroy, bg=self.BTN, fg=self.FG, relief="flat", padx=14, pady=6)\
             .pack(side="left", padx=8)
@@ -1159,13 +1530,13 @@ class TDApp(tk.Tk):
     def save_profile_data(self):
         data = {
             "Имя": self.name_var.get().strip(),
-            "Пол": self.gender_var.get().strip(),
-            "Город": self.city_var.get().strip(),
+            "Пол": (getattr(self, "_profile_value_to_ru", None) or {}).get(self.gender_var.get().strip(), self.gender_var.get().strip()),
+            "Город": (getattr(self, "_profile_city_display_to_ru", None) or {}).get(self.city_var.get().strip(), self.city_var.get().strip()),
             "Дата рождения": self.birth_var.get().strip(),
-            "Семейное положение": self.marital_var.get().strip(),
-            "Родители": self.parents_var.get().strip(),
+            "Семейное положение": (getattr(self, "_profile_value_to_ru", None) or {}).get(self.marital_var.get().strip(), self.marital_var.get().strip()),
+            "Родители": (getattr(self, "_profile_value_to_ru", None) or {}).get(self.parents_var.get().strip(), self.parents_var.get().strip()),
             "Дети": max(0, min(10, int(self.children_var.get()))),
-            "Друзья": self.friends_var.get().strip(),
+            "Друзья": (getattr(self, "_profile_value_to_ru", None) or {}).get(self.friends_var.get().strip(), self.friends_var.get().strip()),
             "Домашние животные": self.pets_text.get("1.0", "end").strip(),
             "Хобби, интересы": self.hobby_text.get("1.0", "end").strip(),
             "Комментарий": self.comment_text.get("1.0", "end").strip(),
@@ -1181,10 +1552,10 @@ class TDApp(tk.Tk):
 
             self.update_llm_profile()
             self.tk_renew_events()
-            messagebox.showinfo("Сохранено", "Профиль сохранён.")
+            messagebox.showinfo(self.tr("msg.saved_title","Сохранено"), self.tr("msg.profile_saved","Профиль сохранён."))
             self.show_home()
         else:
-            messagebox.showerror("Ошибка", "Не удалось сохранить профиль.")
+            messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("msg.profile_save_failed","Не удалось сохранить профиль."))
 
     def show_profile(self):
         self.raise_frame("profile")
@@ -1195,27 +1566,28 @@ class TDApp(tk.Tk):
             self.build_profile()
             return
 
-        def normalize(value: str, allowed: tuple[str, ...]) -> str:
-            value = (value or "").strip()
-            return value if value in allowed else ""
-
 
         self.name_var.set(str(self.profile.get("Имя", "")))
-        self.gender_var.set(normalize(self.profile.get("Пол", ""), ("Мужской", "Женский")))
-        self.city_var.set(normalize(self.profile.get("Город", ""), tuple(city_list)))
+        self.gender_var.set(self.normalize_text_for_ui(self.profile.get("Пол", ""), ("Мужской", "Женский")))
+        self.city_var.set(self.normalize_text_for_ui(self.profile.get("Город", ""), tuple(city_list)))
         self.birth_var.set(str(self.profile.get("Дата рождения", "")))
-        self.marital_var.set(normalize(
+        self.marital_var.set(self.normalize_text_for_ui(
             self.profile.get("Семейное положение", ""),
             ("Холост / Не замужем", "Женат / Замужем"),
         ))
-        self.parents_var.set(normalize(self.profile.get("Родители", ""), ("Да", "Нет")))
-        self.friends_var.set(normalize(self.profile.get("Друзья", ""), ("Да", "Нет")))
+        self.parents_var.set(self.normalize_text_for_ui(self.profile.get("Родители", ""), ("Да", "Нет")))
+        self.friends_var.set(self.normalize_text_for_ui(self.profile.get("Друзья", ""), ("Да", "Нет")))
 
         try:
             children_default = int(self.profile.get("Дети", 0))
         except Exception:
             children_default = 0
         self.children_var.set(max(0, min(10, children_default)))
+        if hasattr(self, "children_slider"):
+            try:
+                self.children_slider.set(int(self.children_var.get()))
+            except Exception:
+                pass
 
         pets_default = str(self.profile.get("Домашние животные", ""))
         hobby_default = str(self.profile.get("Хобби, интересы", ""))
@@ -1234,114 +1606,277 @@ class TDApp(tk.Tk):
             self.comment_text.insert("1.0", comment_default)
 
 
+
+
+    @staticmethod
+    def _transliterate_ru(text: str) -> str:
+        """Простая транслитерация для отображения некоторых элементов."""
+        if not isinstance(text, str):
+            return str(text)
+        m = {
+            "А":"A","Б":"B","В":"V","Г":"G","Д":"D","Е":"E","Ё":"Yo","Ж":"Zh","З":"Z","И":"I","Й":"Y","К":"K","Л":"L","М":"M","Н":"N","О":"O","П":"P","Р":"R","С":"S","Т":"T","У":"U","Ф":"F","Х":"Kh","Ц":"Ts","Ч":"Ch","Ш":"Sh","Щ":"Sch","Ъ":"","Ы":"Y","Ь":"","Э":"E","Ю":"Yu","Я":"Ya",
+            "а":"a","б":"b","в":"v","г":"g","д":"d","е":"e","ё":"yo","ж":"zh","з":"z","и":"i","й":"y","к":"k","л":"l","м":"m","н":"n","о":"o","п":"p","р":"r","с":"s","т":"t","у":"u","ф":"f","х":"kh","ц":"ts","ч":"ch","ш":"sh","щ":"sch","ъ":"","ы":"y","ь":"","э":"e","ю":"yu","я":"ya",
+        }
+        return "".join(m.get(ch, ch) for ch in text)
+    def normalize_text_for_ui(self, value: str, allowed: tuple[str, ...]) -> str:
+        value = (value or "").strip()
+        return value if value in allowed else (allowed[0] if allowed else "")
+
+
     # НАСТРОЙКИ
+
+    def load_option_from_config(self, theme_list=None, voice_list=None):
+        # Если вкладка настроек ещё не построена — просто строим
+        if not hasattr(self, "opt_theme_var"):
+            return
+        theme_list = theme_list or tuple(settings.THEMES.keys()) or (settings.THEMES_DEFAULT,) or ("Тёмная",)
+        voice_list = voice_list or tuple(TTS_VOICES.keys()) or ("Наталья",)
+
+        opt = settings.app_options
+        self.opt_use_asr_var.set(value=bool(getattr(opt, "USE_TTS", True)))
+        theme_key = self.normalize_text_for_ui(getattr(opt, "THEME", theme_list[0]), theme_list)
+        theme_name = (getattr(self, "_theme_key_to_name", None) or {}).get(theme_key, theme_key)
+        self.opt_theme_var.set(value=theme_name)
+
+        voice_key = self.normalize_text_for_ui(getattr(opt, "TTS_VOICE", voice_list[0]), voice_list)
+        voice_name = (getattr(self, "_voice_key_to_name", None) or {}).get(voice_key, voice_key)
+        self.opt_voice_var.set(value=voice_name)
+
+
+        # Языковые установки по умолчанию
+        try:
+            ui_code = str(getattr(opt, "LANG_UI", "ru"))
+            chat_code = str(getattr(opt, "LANG_CHAT", ui_code))
+            content_code = str(getattr(opt, "LANG_CONTENT", ui_code))
+            code_to_name = getattr(self, "_lang_code_to_name", None) or {}
+            self.opt_lang_ui_var.set(value=code_to_name.get(ui_code, ui_code))
+            self.opt_lang_chat_var.set(value=code_to_name.get(chat_code, chat_code))
+            self.opt_lang_content_var.set(value=code_to_name.get(content_code, content_code))
+        except Exception:
+            pass
+
+
 
     def build_options(self):
         f = self.frames["options"]
-        #self.frames["options"] = tk.Frame(parent_container, bg=self.BG)
+        for w in f.winfo_children():
+            try:
+                w.destroy()
+            except Exception:
+                pass
 
-        tk.Label(
-            f, text="Настройки", fg=self.FG, bg=self.BG,
-            font=("Arial", 18, "bold")
-        ).pack(pady=20)
+        # Фон страницы
+        try:
+            f.configure(fg_color=self.BG)
+        except Exception:
+            pass
 
-        def normalize(value: str, allowed: tuple[str, ...]) -> str:
-            value = (value or "").strip()
-            return value if value in allowed else ""
+        ctk.CTkLabel(
+            f,
+            text=self.tr("options.title", "Настройки"),
+            font=(self.FONT_NAME, 18, "bold"),
+            text_color=self.FG,
+        ).pack(pady=(16, 8))
 
         # варианты выбора из
-        theme_list = tuple(settings.THEMES.keys())
-        voice_list = tuple(TTS_VOICES.keys())
+        theme_keys = tuple(settings.THEMES.keys()) or (settings.THEMES_DEFAULT,) or ("Тёмная",)
+        voice_keys = tuple(TTS_VOICES.keys()) or ("Наталья",)
 
-        # если вдруг списки пустые — не падаем
-        if not theme_list:
-            theme_list = ("Светлая",)
-        if not voice_list:
-            voice_list = ("Наталья",)
+        # Выбор языка: показываем удобочитаемые названия, сохраняем коды
+        langs = ("ru", "en", "it", "de")
+        self._lang_code_to_name = {c: self.tr(f"language.{c}", c) for c in langs}
+        self._lang_name_to_code = {v: k for k, v in self._lang_code_to_name.items()}
+        lang_display_values = [self._lang_code_to_name[c] for c in langs]
 
-        # значения по умолчанию
-        opt = settings.app_options
+        # Выбор темы
+        themes_map = self.lang_get("options.themes", {}) or {}
+        self._theme_key_to_name = {k: themes_map.get(k, k) for k in theme_keys}
+        self._theme_name_to_key = {v: k for k, v in self._theme_key_to_name.items()}
+        theme_display_values = [self._theme_key_to_name[k] for k in theme_keys]
 
-        self.opt_use_asr_var = tk.BooleanVar(value=bool(getattr(opt, "USE_TTS", True)))
-        self.opt_theme_var = tk.StringVar(value=normalize(getattr(opt, "THEME", "white"), theme_list))
-        self.opt_voice_var = tk.StringVar(value=normalize(getattr(opt, "TTS_VOICE", "Наталья"), voice_list))
+        voices_map = self.lang_get("options.voices", {}) or {}
 
-        form = tk.Frame(f, bg=self.BG)
-        form.pack(pady=10)
+        def _voice_disp(v):
+            if self.lang_ui == "ru":
+                return v
+            dv = voices_map.get(v)
+            if isinstance(dv, str) and dv.strip():
+                return dv
+            return self._transliterate_ru(v)
+
+        self._voice_key_to_name = {k: _voice_disp(k) for k in voice_keys}
+        self._voice_name_to_key = {v: k for k, v in self._voice_key_to_name.items()}
+        voice_display_values = [self._voice_key_to_name[k] for k in voice_keys]
+
+        self.opt_use_asr_var = tk.BooleanVar()
+        self.opt_theme_var = tk.StringVar()
+        self.opt_voice_var = tk.StringVar()
+        self.opt_lang_ui_var = tk.StringVar()
+        self.opt_lang_chat_var = tk.StringVar()
+        self.opt_lang_content_var = tk.StringVar()
+        self.load_option_from_config(theme_keys, voice_keys)
+
+        form = ctk.CTkFrame(f, fg_color="transparent")
+        form.pack(padx=20, pady=10, fill="x")
+        form.grid_columnconfigure(0, weight=0)
+        form.grid_columnconfigure(1, weight=1)
 
         def label(row, text):
-            tk.Label(form, text=text + ":", fg=self.FG, bg=self.BG, anchor="w", width=25)\
-                .grid(row=row, column=0, sticky="w", padx=5, pady=6)
+            ctk.CTkLabel(form, text=text + ":", text_color=self.FG, anchor="w")                .grid(row=row, column=0, sticky="w", padx=(0, 12), pady=8)
 
         # озвучивать ответ в чате
-        label(0, "Озвучивать ответ в чате *")
-        chk = tk.Checkbutton(
-            form, variable=self.opt_use_asr_var,
-            bg=self.BG, fg=self.FG,
-            activebackground=self.BG, activeforeground=self.FG,
-            selectcolor=self.ACCENT,
-            highlightthickness=0, borderwidth=0
-        )
-        chk.grid(row=0, column=1, sticky="w", padx=5, pady=6)
+        label(0, self.tr("options.tts", "Озвучивать ответ в чате"))
+        try:
+            sw = ctk.CTkSwitch(
+                form,
+                text="",
+                variable=self.opt_use_asr_var,
+                onvalue=True,
+                offvalue=False,
+                fg_color=getattr(self.theme, "SWITCH_FG", None) or self.BTN,
+                progress_color=getattr(self.theme, "SWITCH_PROGRESS", None) or self.ACCENT,
+                button_color=getattr(self.theme, "SWITCH_BUTTON", None) or self.ACCENT,
+                button_hover_color=getattr(self.theme, "SWITCH_BUTTON", None) or self.ACCENT,
+            )
+            sw.grid(row=0, column=1, sticky="w", pady=8)
+        except Exception:
+            cb = ctk.CTkCheckBox(form, text="", variable=self.opt_use_asr_var)
+            try:
+                cb.configure(fg_color=self.ACCENT, hover_color=self.ACCENT, text_color=self.FG, border_color=self.ACTIVE_BG)
+            except Exception:
+                pass
+            cb.grid(row=0, column=1, sticky="w", pady=8)
 
-        # выбрать тему
-        label(1, "Тема оформления *")
-        theme_frame = tk.Frame(form, bg=self.BG)
-        theme_frame.grid(row=1, column=1, sticky="w", padx=5, pady=6)
+        label(1, self.tr("options.theme", "Тема оформления"))
+        self.opt_theme_menu = ctk.CTkOptionMenu(form, values=list(theme_display_values), variable=self.opt_theme_var)
+        try:
+            self.opt_theme_menu.configure(
+                fg_color=self.BTN,
+                button_color=self.ACCENT,
+                button_hover_color=self.ACCENT,
+                text_color=self.FG,
+                dropdown_fg_color=self.PANEL,
+                dropdown_hover_color=self.ACTIVE_BG,
+                dropdown_text_color=self.FG,
+            )
+        except Exception:
+            pass
+        self.opt_theme_menu.grid(row=1, column=1, sticky="w", pady=8)
 
-        self.opt_theme_menu = tk.OptionMenu(theme_frame, self.opt_theme_var, *theme_list)
-        self.opt_theme_menu.config(
-            bg=self.BTN, fg=self.FG,
-            activebackground=self.ACTIVE_BG, activeforeground=self.FG,
-            relief="flat", highlightthickness=0, padx=8, pady=4
-        )
-        self.opt_theme_menu["menu"].config(
-            bg=self.BTN, fg=self.FG,
-            activebackground=self.ACTIVE_BG, activeforeground=self.FG,
-            relief="flat", borderwidth=0
-        )
-        self.opt_theme_menu.pack(side="left")
+        label(2, self.tr("options.voice", "Голос чата"))
+        self.opt_voice_menu = ctk.CTkOptionMenu(form, values=list(voice_display_values), variable=self.opt_voice_var)
+        try:
+            self.opt_voice_menu.configure(
+                fg_color=self.BTN,
+                button_color=self.ACCENT,
+                button_hover_color=self.ACCENT,
+                text_color=self.FG,
+                dropdown_fg_color=self.PANEL,
+                dropdown_hover_color=self.ACTIVE_BG,
+                dropdown_text_color=self.FG,
+            )
+        except Exception:
+            pass
+        self.opt_voice_menu.grid(row=2, column=1, sticky="w", pady=8)
 
-        # голос
-        label(2, "Голос Чата")
-        voice_frame = tk.Frame(form, bg=self.BG)
-        voice_frame.grid(row=2, column=1, sticky="w", padx=5, pady=6)
+        label(3, self.tr("options.lang_ui", "Язык интерфейса"))
+        self.opt_lang_ui_menu = ctk.CTkOptionMenu(form, values=list(lang_display_values), variable=self.opt_lang_ui_var)
+        try:
+            self.opt_lang_ui_menu.configure(
+                fg_color=self.BTN,
+                button_color=self.ACCENT,
+                button_hover_color=self.ACCENT,
+                text_color=self.FG,
+                dropdown_fg_color=self.PANEL,
+                dropdown_hover_color=self.ACTIVE_BG,
+                dropdown_text_color=self.FG,
+            )
+        except Exception:
+            pass
+        self.opt_lang_ui_menu.grid(row=3, column=1, sticky="w", pady=8)
 
-        self.opt_voice_menu = tk.OptionMenu(voice_frame, self.opt_voice_var, *voice_list)
-        self.opt_voice_menu.config(
-            bg=self.BTN, fg=self.FG,
-            activebackground=self.ACTIVE_BG, activeforeground=self.FG,
-            relief="flat", highlightthickness=0, padx=8, pady=4
-        )
-        self.opt_voice_menu["menu"].config(
-            bg=self.BTN, fg=self.FG,
-            activebackground=self.ACTIVE_BG, activeforeground=self.FG,
-            relief="flat", borderwidth=0
-        )
-        self.opt_voice_menu.pack(side="left")
+        label(4, self.tr("options.lang_chat", "Язык ответов (LLM)"))
+        self.opt_lang_chat_menu = ctk.CTkOptionMenu(form, values=list(lang_display_values), variable=self.opt_lang_chat_var)
+        try:
+            self.opt_lang_chat_menu.configure(
+                fg_color=self.BTN,
+                button_color=self.ACCENT,
+                button_hover_color=self.ACCENT,
+                text_color=self.FG,
+                dropdown_fg_color=self.PANEL,
+                dropdown_hover_color=self.ACTIVE_BG,
+                dropdown_text_color=self.FG,
+                state="disabled",          # state=ctk.DISABLED
+            )
+        except Exception:
+            pass
+        self.opt_lang_chat_menu.grid(row=4, column=1, sticky="w", pady=8)
 
-        tk.Button(
-            f, text="Сохранить настройки",
+        label(5, self.tr("options.lang_content", "Язык контента"))
+        self.opt_lang_content_menu = ctk.CTkOptionMenu(form, values=list(lang_display_values), variable=self.opt_lang_content_var)
+        try:
+            self.opt_lang_content_menu.configure(
+                fg_color=self.BTN,
+                button_color=self.ACCENT,
+                button_hover_color=self.ACCENT,
+                text_color=self.FG,
+                dropdown_fg_color=self.PANEL,
+                dropdown_hover_color=self.ACTIVE_BG,
+                dropdown_text_color=self.FG,
+                state="disabled",          # state=ctk.DISABLED
+            )
+        except Exception:
+            pass
+        self.opt_lang_content_menu.grid(row=5, column=1, sticky="w", pady=8)
+
+
+        btns = ctk.CTkFrame(f, fg_color="transparent")
+        btns.pack(pady=(10, 6))
+
+        ctk.CTkButton(
+            btns,
+            text=self.tr("buttons.apply", "Применить"),
             command=self.save_options_data,
-            bg=self.ACCENT, fg="white", relief="flat",
-            padx=10, pady=6
-        ).pack(pady=20)
+            fg_color=self.ACCENT,
+            hover_color=self.ACCENT,
+            text_color=self.FG,
+            corner_radius=10,
+            height=38,
+            width=160,
+        ).pack(side="left", padx=10)
 
-        tk.Label(
+        ctk.CTkButton(
+            btns,
+            text=self.tr("buttons.reset", "Вернуть"),
+            command=self.load_option_from_config,
+            fg_color=self.BTN,
+            hover_color=self.ACTIVE_BG,
+            text_color=self.FG,
+            corner_radius=10,
+            height=38,
+            width=140,
+        ).pack(side="left", padx=10)
+
+        ctk.CTkLabel(
             f,
-            text='* Настройки обновляются поле перезагрузки',
-            fg=self.LABEL_FG, bg=self.BG, font=("Arial", 10),
-            justify="center"
-        ).pack(pady=10)
+            text=self.tr("options.hint","Изменения применяются сразу после нажатия «Применить».") ,
+            text_color=self.LABEL_FG,
+            font=(self.FONT_NAME, 10),
+            justify="center",
+            wraplength=720,
+        ).pack(pady=(6, 10), padx=24)
 
     def save_options_data(self):
-        # сохраняем app_options в data/app_options.json
+        # сохраняем app_options в data/app_options.json и сразу прменяем
         try:
             theme_list = tuple(settings.THEMES.keys()) or ("white",)
             voice_list = tuple(TTS_VOICES.keys()) or ("Наталья",)
 
-            theme = (self.opt_theme_var.get() or "").strip()
-            voice = (self.opt_voice_var.get() or "").strip()
+            theme_disp = (self.opt_theme_var.get() or "").strip()
+            voice_disp = (self.opt_voice_var.get() or "").strip()
+
+            theme = (getattr(self, "_theme_name_to_key", None) or {}).get(theme_disp, theme_disp)
+            voice = (getattr(self, "_voice_name_to_key", None) or {}).get(voice_disp, voice_disp)
 
             # небольшая нормализация
             if theme not in theme_list:
@@ -1349,26 +1884,87 @@ class TDApp(tk.Tk):
             if voice not in voice_list:
                 voice = voice_list[0]
 
+            # Запоминаем предыдущее состояние настроек.
+            prev_ui = getattr(self, "lang_ui", "ru")
+            prev_chat = getattr(self, "lang_chat", prev_ui)
+            prev_content = getattr(self, "lang_content", prev_ui)
+
             settings.app_options.USE_TTS = bool(self.opt_use_asr_var.get())
             settings.app_options.THEME = theme
+
             settings.app_options.TTS_VOICE = voice
 
+            # языки
+            ui_sel = (self.opt_lang_ui_var.get() or "ru").strip()
+            chat_sel = (self.opt_lang_chat_var.get() or ui_sel).strip()
+            content_sel = (self.opt_lang_content_var.get() or ui_sel).strip()
+
+            name_to_code = getattr(self, "_lang_name_to_code", None) or {}
+            ui_lang = name_to_code.get(ui_sel, ui_sel)
+            chat_lang = name_to_code.get(chat_sel, chat_sel)
+            content_lang = name_to_code.get(content_sel, content_sel)
+
+            # Синхронизируем язык ответа и контекста с языком интерфейса
+            if prev_chat == prev_ui and chat_lang == prev_chat and ui_lang != prev_ui:
+                chat_lang = ui_lang
+            if prev_content == prev_ui and content_lang == prev_content and ui_lang != prev_ui:
+                content_lang = ui_lang
+
+
+            settings.app_options.LANG_UI = ui_lang
+            settings.app_options.LANG_CHAT = chat_lang
+            settings.app_options.LANG_CONTENT = content_lang
         except Exception:
-            messagebox.showerror("Ошибка", "Некорректные настройки.")
+            messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("msg.invalid_options","Некорректные настройки."))
             return
 
         if settings.save_app_options(settings.app_options):
             # применяем тему сразу
-            if hasattr(self, "theme_renew"):
-                try:
-                    self.theme_renew(settings.app_options.THEME)
-                except Exception:
-                    pass
+            try:
+                self.theme_renew(settings.app_options.THEME)
+            except Exception:
+                pass
 
-            messagebox.showinfo("Сохранено", "Настройки сохранены.")
-            self.show_home()
+            # применить CTk вид и перерисовать чтоб настройки цвета вступили в силу
+            try:
+                self._apply_ctk_appearance()
+            except Exception:
+                pass
+            # Перезагрузить языки
+            try:
+                self.lang_ui = settings.app_options.LANG_UI
+                self.lang_chat = settings.app_options.LANG_CHAT
+                self.lang_content = settings.app_options.LANG_CONTENT
+
+                self.language.load(self.lang_ui)
+                self.tr = self.language.t
+                self.lang_get = self.language.get
+
+                self.language_chat.load(self.lang_chat)
+                self.tr_chat = self.language_chat.t
+            except Exception:
+                pass
+
+            # обновляем системный промпт и статьи при смене языка
+            try:
+                if self.llm_item is not None:
+                    self.llm_item.update_languages(self.lang_chat, self.lang_content)
+            except Exception:
+                pass
+
+            try:
+                self.create_menu()
+            except Exception:
+                pass
+
+            try:
+                self.rebuild_ui(keep_page="options")
+            except Exception:
+                pass
+
+            messagebox.showinfo(self.tr("msg.saved_title","Сохранено"), self.tr("msg.options_saved","Настройки сохранены и применены."))
         else:
-            messagebox.showerror("Ошибка", "Не удалось сохранить настройки.")
+            messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("msg.save_failed","Не удалось сохранить настройки."))
 
     def show_options(self):
         self.raise_frame("options")
@@ -1387,13 +1983,7 @@ class TDApp(tk.Tk):
         theme_list = tuple(settings.THEMES.keys()) or ("white",)
         voice_list = tuple(TTS_VOICES.keys()) or ("Наталья",)
 
-        def normalize(value: str, allowed: tuple[str, ...]) -> str:
-            value = (value or "").strip()
-            return value if value in allowed else allowed[0]
-
-        self.opt_use_asr_var.set(bool(getattr(opt, "USE_TTS", True)))
-        self.opt_theme_var.set(normalize(getattr(opt, "THEME", theme_list[0]), theme_list))
-        self.opt_voice_var.set(normalize(getattr(opt, "TTS_VOICE", voice_list[0]), voice_list))
+        self.load_option_from_config(theme_list, voice_list)
 
 
 
@@ -1402,26 +1992,59 @@ class TDApp(tk.Tk):
 
     def build_about(self):
         f = self.frames["about"]
+        for w in f.winfo_children():
+            try:
+                w.destroy()
+            except Exception:
+                pass
 
-        tk.Label(
-            f, text="О проекте", fg=self.FG, bg=self.BG,
-            font=("Arial", 18, "bold")
-        ).pack(pady=20)
+        # Фон страницы
+        try:
+            f.configure(fg_color=self.BG)
+        except Exception:
+            pass
 
-        text = (
-            "Treatment of Depression «Ты не один» — учебный инженерный проект. \n"
-            "Настольное приложение на Python с графическим интерфейсом на базе Tkinter (далее Treatment of Depression или TD). В одном приложении пользователь получает три базовые функции: быстрые поддерживающие подсказки, чат поддержку на базе LLM и дневник для записи самочувствия и настроения. Дополнительно реализованы профиль пользователя и настройки. \n"
-            "Приложение предназначено для поддержки (саморегуляции), организации дня и снижения стресса.\n"
-            "\nВажно: приложение не является медицинским изделием, не ставит диагноз и не заменяет врача/психолога. При выраженном ухудшении самочувствия необходимо обратиться к специалистам и/или в службы экстренной помощи.\n"
-            "\nФункции:\n"
-            "- Слова поддержки\n"
-            "- Чат с использованием генративной модели\n"
-            "- Дневник самочувствия\n"
-            "- Профиль пользователя\n"
-            "- поддерживаются горячие клавиши. Ctrl + первая буква пункта меню"
+        ctk.CTkLabel(
+            f,
+            text=self.tr("about.title","О проекте"),
+            font=(self.FONT_NAME, 18, "bold"),
+            text_color=self.FG,
+        ).pack(pady=(16, 8))
+
+        default_text = """Treatment of Depression «Ты не один» — учебный инженерный проект.
+Настольное приложение на Python с графическим интерфейсом на базе Tkinter/CustomTkinter.
+В одном приложении пользователь получает три базовые функции: быстрые поддерживающие подсказки, чат поддержку на базе LLM и дневник для записи самочувствия и настроения.
+
+Важно: приложение не является медицинским изделием, не ставит диагноз и не заменяет врача/психолога.
+При выраженном ухудшении самочувствия необходимо обратиться к специалистам и/или в службы экстренной помощи.
+
+Функции:
+• Слова поддержки
+• Чат с использованием генеративной модели
+• Дневник самочувствия
+• Профиль пользователя
+• Поддерживаются горячие клавиши (Ctrl + первая буква пункта меню)
+"""
+
+        text = self.tr("about.text", default_text)
+
+
+        box = ctk.CTkTextbox(
+            f,
+            fg_color=self.PANEL,
+            text_color=self.FG,
+            corner_radius=10,
+            height=420,
         )
-
-        tk.Label(f, text=text, fg=self.FG, bg=self.BG, wraplength=600).pack(padx=20, pady=40)
+        box.pack(padx=20, pady=(0, 16), fill="both", expand=True)
+        box.insert("1.0", text)
+        try:
+            box.configure(state="disabled")
+        except Exception:
+            try:
+                box._textbox.configure(state="disabled")
+            except Exception:
+                pass
 
     def show_about(self):
         self.raise_frame("about")

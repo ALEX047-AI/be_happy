@@ -66,15 +66,22 @@ class SaluteSpeech:
         # print(f'token data = {answer}')
         return answer
 
-    def get_audio_from_text(self, text, format='pcm16', voice='May_24000'):
+    def get_audio_from_text(self, text, format='pcm16', voice='May_24000', lang='ru'):
         """
         Для проигрываетля нужен pcm16, для сохранения как файл лучше opus
         """
         url = f"{self.SALUTE_SYNTHESIZE_URL}?format={format}&voice={voice}"
+        if lang:
+            c_type = 'application/ssml'
+            tss_text_prefix = f"""<voice name="{voice}" lang="{lang}">"""
+            tss_text_suffix = """</voice>"""
+            text = f'{tss_text_prefix or ""}{text}{tss_text_suffix or ""}'
+        else:
+            c_type = 'application/text'
 
         payload = text
         headers = {
-                    'Content-Type': 'application/text',
+                    'Content-Type': c_type,
                     'Accept': f'audio/x-{format}',
                     'Authorization': f'Bearer {self.bearer_token}'
         }
@@ -341,6 +348,7 @@ class TTS_Stream(Thread):
         self.finished_item = finished_item
         self.format = 'pcm16'
         self._voice = voice
+        self._lang_chat = 'ru'
         self.save_to_disk = save_to_disk
         self.sample_rate = sample_rate # Зависит от модели голоса
         self.channels = channels
@@ -351,6 +359,14 @@ class TTS_Stream(Thread):
             return settings.tts_voice
         except:
             return self._voice
+
+    @property
+    def lang_chat(self):
+        try:
+            return settings.app_options.LANG_CHAT
+            # settings.app_options.LANG_UI
+        except:
+            return self._lang_chat
 
     def _clean_queue(self):
         # безопасная очистка очереди
@@ -381,7 +397,7 @@ class TTS_Stream(Thread):
 
             count += 1
             print(f"чанк # {count} -> TTS", flush=True)
-            audio_data = salut_engine.get_audio_from_text(text, self.format, self.voice)
+            audio_data = salut_engine.get_audio_from_text(text, self.format, self.voice, self.lang_chat)
             try:
                 if not self._text_to_queue_event_pause.is_set():
                     pkt = AudioPacket(

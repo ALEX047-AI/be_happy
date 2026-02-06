@@ -1,0 +1,152 @@
+{
+  "language": {
+    "ru": "Русский",
+    "en": "English",
+    "it": "Italiano",
+    "de": "Deutsch"
+  },
+  "menu": {
+    "file": "Datei",
+    "export_profile": "Profil exportieren",
+    "import_profile": "Profil importieren",
+    "export_diary": "Tagebuch exportieren",
+    "import_diary": "Tagebuch importieren",
+    "exit": "Beenden",
+    "home": "Start",
+    "chat": "Support-Chat",
+    "diary": "Tagebuch",
+    "profile": "Profil",
+    "options": "Einstellungen",
+    "about": "Über"
+  },
+  "home": {
+    "slogan": "Du bist nicht allein",
+    "main_button": "Kurzer Rat",
+    "new_phrase": "Neuer Satz",
+    "disclaimer": "Dies ist eine Lern-App. Wenn du dringend Hilfe brauchst —\nbitte kontaktiere lokale Hilfsdienste oder eine nahestehende Person."
+  },
+  "chat": {
+    "title": "Support-Chat",
+    "chat_intro_text": "TD: Hallo. Ich kann Ihnen zuhören. Was beschäftigt Sie gerade?",
+    "placeholder": "Nachricht eingeben…"
+  },
+  "about": {
+    "title": "Über",
+    "text": "Treatment of Depression „Du bist nicht allein“ ist ein pädagogisches Ingenieurprojekt.\nEine Desktop-Python-App mit Tkinter/CustomTkinter-Oberfläche.\nSie kombiniert kurze unterstützende Sätze, einen LLM-basierten Support-Chat und ein Tagebuch zur Stimmungs-/Befindlichkeitsverfolgung.\n\nWichtig: Diese App ist kein Medizinprodukt, stellt keine Diagnose und ersetzt keinen Arzt/Psychologen.\nBei deutlicher Verschlechterung bitte Fachleute und/oder Notdienste kontaktieren.\n\nFunktionen:\n• Unterstützende Sätze\n• Chat mit generativem Modell\n• Befindlichkeits-Tagebuch\n• Nutzerprofil\n• Tastenkürzel (Strg + erster Buchstabe des Menüpunktes)\n"
+  },
+  "profile": {
+    "title": "Profil",
+    "fields": {
+      "Имя": "Name",
+      "Пол": "Geschlecht",
+      "Город": "Stadt",
+      "Дата рождения": "Geburtsdatum",
+      "Семейное положение": "Familienstand",
+      "Родители": "Eltern",
+      "Дети": "Kinder",
+      "Друзья": "Freunde",
+      "Домашние животные": "Haustiere",
+      "Хобби, интересы": "Hobbys / Interessen",
+      "Комментарий": "Kommentar"
+    },
+    "values": {
+      "Да": "Ja",
+      "Нет": "Nein",
+      "Мужской": "Männlich",
+      "Женский": "Weiblich",
+      "Холост / Не замужем": "Single",
+      "Женат / Замужем": "Verheiratet"
+    },
+    "save_button": "Profil speichern",
+    "cities": {
+      "Москва": "Moskau",
+      "Санкт-Петербург": "Sankt Petersburg"
+    }
+  },
+  "diary": {
+    "title": "Tagebuch",
+    "today": "Heute",
+    "save": "Speichern",
+    "mood": "Stimmung",
+    "period": "Zeitraum",
+    "score": "Bewertung",
+    "clock": "Jetzt: {now:%d.%m.%Y %H:%M}",
+    "pick_date": "Datum wählen",
+    "chart_title": "Befinden (nach Datum)",
+    "months_short": [
+      "Jan",
+      "Feb",
+      "Mär",
+      "Apr",
+      "Mai",
+      "Jun",
+      "Jul",
+      "Aug",
+      "Sep",
+      "Okt",
+      "Nov",
+      "Dez"
+    ],
+    "periods": {
+      "morning": "Morgen",
+      "afternoon": "Tag",
+      "evening": "Abend"
+    },
+    "errors": {
+      "save_failed": "Tagebuch konnte nicht gespeichert werden:\n{e}",
+      "delete_failed": "Tagebucheintrag konnte nicht gelöscht werden"
+    }
+  },
+  "options": {
+    "title": "Einstellungen",
+    "tts": "Chat-Antworten vorlesen",
+    "theme": "Design",
+    "voice": "Chat-Stimme",
+    "lang_ui": "Sprache der Oberfläche",
+    "lang_chat": "Sprache der Antworten",
+    "lang_content": "Sprache des Kontexts",
+    "hint": "Änderungen werden sofort nach „Anwenden“ übernommen.\n„Kira“ Stimme eignet sich am besten für Sprachen außer Russisch.",
+    "themes": {
+      "Тёмная": "Dunkel",
+      "Светлая": "Hell"
+    }
+  },
+  "buttons": {
+    "apply": "Anwenden",
+    "reset": "Zurücksetzen",
+    "send": "Senden",
+    "clear": "Leeren",
+    "ok": "OK",
+    "cancel": "Abbrechen"
+  },
+  "dlg": {
+    "export_profile_title": "Profil exportieren",
+    "import_profile_title": "Profil importieren",
+    "export_diary_title": "Tagebuch exportieren",
+    "import_diary_title": "Tagebuch importieren",
+    "filetype_error": "Wähle: .json .xlsx .ods .csv",
+    "export_profile_failed": "Profil konnte nicht exportiert werden:\n{e}",
+    "export_diary_failed": "Tagebuch konnte nicht exportiert werden:\n{e}",
+    "import_profile_failed": "Profil konnte nicht importiert werden:\n{e}",
+    "import_diary_failed": "Tagebuch konnte nicht importiert werden:\n{e}"
+  },
+  "msg": {
+    "saved_title": "Gespeichert",
+    "options_saved": "Einstellungen wurden gespeichert und angewendet.",
+    "error_title": "Fehler",
+    "invalid_options": "Ungültige Einstellungen.",
+    "save_failed": "Einstellungen konnten nicht gespeichert werden.",
+    "ok_title": "OK",
+    "profile_exported": "Profil exportiert.",
+    "profile_imported": "Profil importiert.",
+    "diary_exported": "Tagebuch exportiert.",
+    "diary_imported": "Tagebuch importiert.",
+    "profile_import_wrong": "Die Profil-Datei muss JSON (dict) sein.",
+    "profile_format_wrong": "Datenformat passt nicht zum Profil.",
+    "diary_import_wrong": "Die Tagebuch-Datei muss JSON (dict) sein.",
+    "diary_format_wrong": "Datenformat passt nicht zum Tagebuch.",
+    "invalid_date": "Ungültiges Datum.",
+    "profile_saved": "Profil gespeichert.",
+    "profile_save_failed": "Profil konnte nicht gespeichert werden."
+  }
+}

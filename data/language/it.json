@@ -1,0 +1,152 @@
+{
+  "language": {
+    "ru": "Русский",
+    "en": "English",
+    "it": "Italiano",
+    "de": "Deutsch"
+  },
+  "menu": {
+    "file": "File",
+    "export_profile": "Esporta profilo",
+    "import_profile": "Importa profilo",
+    "export_diary": "Esporta diario",
+    "import_diary": "Importa diario",
+    "exit": "Esci",
+    "home": "Home",
+    "chat": "Chat di supporto",
+    "diary": "Diario",
+    "profile": "Profilo",
+    "options": "Impostazioni",
+    "about": "Informazioni"
+  },
+  "home": {
+    "slogan": "Non sei solo",
+    "main_button": "Consiglio rapido",
+    "new_phrase": "Nuova frase",
+    "disclaimer": "Questa è un'app educativa. Se hai bisogno di aiuto urgente —\ncontatta i servizi di supporto locali o una persona vicina."
+  },
+  "chat": {
+    "title": "Chat di supporto",
+    "chat_intro_text": "TD: Ciao. Sono qui per ascoltarti. Cosa ti passa per la testa in questo momento?",
+    "placeholder": "Scrivi un messaggio…"
+  },
+  "about": {
+    "title": "Informazioni",
+    "text": "Treatment of Depression “Non sei solo” è un progetto educativo di ingegneria.\nUn'app desktop Python con interfaccia Tkinter/CustomTkinter.\nInclude frasi di supporto, chat di supporto basata su LLM e un diario per monitorare umore e benessere.\n\nImportante: questa app non è un dispositivo medico, non fa diagnosi e non sostituisce un medico/psicologo.\nIn caso di peggioramento significativo, contatta professionisti e/o servizi di emergenza.\n\nFunzioni:\n• Frasi di supporto\n• Chat con modello generativo\n• Diario del benessere\n• Profilo utente\n• Scorciatoie da tastiera (Ctrl + prima lettera del menu)\n"
+  },
+  "profile": {
+    "title": "Profilo",
+    "fields": {
+      "Имя": "Nome",
+      "Пол": "Genere",
+      "Город": "Città",
+      "Дата рождения": "Data di nascita",
+      "Семейное положение": "Stato civile",
+      "Родители": "Genitori",
+      "Дети": "Figli",
+      "Друзья": "Amici",
+      "Домашние животные": "Animali domestici",
+      "Хобби, интересы": "Hobby / interessi",
+      "Комментарий": "Commento"
+    },
+    "values": {
+      "Да": "Sì",
+      "Нет": "No",
+      "Мужской": "Maschile",
+      "Женский": "Femminile",
+      "Холост / Не замужем": "Single",
+      "Женат / Замужем": "Sposato/a"
+    },
+    "save_button": "Salva profilo",
+    "cities": {
+      "Москва": "Mosca",
+      "Санкт-Петербург": "San Pietroburgo"
+    }
+  },
+  "diary": {
+    "title": "Diario",
+    "today": "Oggi",
+    "save": "Salva",
+    "mood": "Umore",
+    "period": "Periodo",
+    "score": "Valutazione",
+    "clock": "Ora: {now:%d.%m.%Y %H:%M}",
+    "pick_date": "Scegli data",
+    "chart_title": "Benessere (per data)",
+    "months_short": [
+      "Gen",
+      "Feb",
+      "Mar",
+      "Apr",
+      "Mag",
+      "Giu",
+      "Lug",
+      "Ago",
+      "Set",
+      "Ott",
+      "Nov",
+      "Dic"
+    ],
+    "periods": {
+      "morning": "Mattina",
+      "afternoon": "Giorno",
+      "evening": "Sera"
+    },
+    "errors": {
+      "save_failed": "Impossibile salvare il diario:\n{e}",
+      "delete_failed": "Impossibile eliminare la voce del diario"
+    }
+  },
+  "options": {
+    "title": "Impostazioni",
+    "tts": "Leggi le risposte in chat",
+    "theme": "Tema",
+    "voice": "Voce della chat",
+    "lang_ui": "Lingua dell'interfaccia",
+    "lang_chat": "Lingua delle risposte",
+    "lang_content": "Lingua del contesto",
+    "hint": "Le modifiche vengono applicate subito dopo aver premuto “Applica”.\nLa voce “Kira” è più adatta alle lingue diverse dal russo.",
+    "themes": {
+      "Тёмная": "Scuro",
+      "Светлая": "Chiaro"
+    }
+  },
+  "buttons": {
+    "apply": "Applica",
+    "reset": "Ripristina",
+    "send": "Invia",
+    "clear": "Pulisci",
+    "ok": "OK",
+    "cancel": "Annulla"
+  },
+  "dlg": {
+    "export_profile_title": "Esporta profilo",
+    "import_profile_title": "Importa profilo",
+    "export_diary_title": "Esporta diario",
+    "import_diary_title": "Importa diario",
+    "filetype_error": "Scegli: .json .xlsx .ods .csv",
+    "export_profile_failed": "Impossibile esportare il profilo:\n{e}",
+    "export_diary_failed": "Impossibile esportare il diario:\n{e}",
+    "import_profile_failed": "Impossibile importare il profilo:\n{e}",
+    "import_diary_failed": "Impossibile importare il diario:\n{e}"
+  },
+  "msg": {
+    "saved_title": "Salvato",
+    "options_saved": "Impostazioni salvate e applicate.",
+    "error_title": "Errore",
+    "invalid_options": "Impostazioni non valide.",
+    "save_failed": "Impossibile salvare le impostazioni.",
+    "ok_title": "OK",
+    "profile_exported": "Profilo esportato.",
+    "profile_imported": "Profilo importato.",
+    "diary_exported": "Diario esportato.",
+    "diary_imported": "Diario importato.",
+    "profile_import_wrong": "Il file profilo deve essere JSON (dict).",
+    "profile_format_wrong": "Il formato dei dati non corrisponde al profilo.",
+    "diary_import_wrong": "Il file diario deve essere JSON (dict).",
+    "diary_format_wrong": "Il formato dei dati non corrisponde al diario.",
+    "invalid_date": "Data non valida.",
+    "profile_saved": "Profilo salvato.",
+    "profile_save_failed": "Impossibile salvare il profilo."
+  }
+}

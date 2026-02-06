@@ -1,0 +1,152 @@
+{
+  "language": {
+    "ru": "Русский",
+    "en": "English",
+    "it": "Italiano",
+    "de": "Deutsch"
+  },
+  "menu": {
+    "file": "File",
+    "export_profile": "Export Profile",
+    "import_profile": "Import Profile",
+    "export_diary": "Export Diary",
+    "import_diary": "Import Diary",
+    "exit": "Exit",
+    "home": "Home",
+    "chat": "Support chat",
+    "diary": "Diary",
+    "profile": "Profile",
+    "options": "Settings",
+    "about": "About"
+  },
+  "home": {
+    "slogan": "You are not alone",
+    "main_button": "Quick advice",
+    "new_phrase": "New phrase",
+    "disclaimer": "This is an educational app. If you need emergency help —\nplease contact local support services or someone close to you."
+  },
+  "chat": {
+    "title": "Support chat",
+    "chat_intro_text": "TD: Hello. I'm here to listen. What's on your mind?",
+    "placeholder": "Type a message…"
+  },
+  "about": {
+    "title": "About",
+    "text": "Treatment of Depression “You are not alone” is an educational engineering project.\nA desktop Python app with a Tkinter/CustomTkinter GUI.\nIt combines quick supportive phrases, an LLM-based support chat, and a diary for tracking mood and well-being.\n\nImportant: this app is not a medical device, does not diagnose, and does not replace a doctor/psychologist.\nIf you feel significantly worse, please contact professionals and/or emergency services.\n\nFeatures:\n• Supportive phrases\n• Chat using a generative model\n• Well-being diary\n• User profile\n• Keyboard shortcuts (Ctrl + first letter of the menu item)\n"
+  },
+  "profile": {
+    "title": "Profile",
+    "fields": {
+      "Имя": "Name",
+      "Пол": "Gender",
+      "Город": "City",
+      "Дата рождения": "Date of birth",
+      "Семейное положение": "Marital status",
+      "Родители": "Parents",
+      "Дети": "Children",
+      "Друзья": "Friends",
+      "Домашние животные": "Pets",
+      "Хобби, интересы": "Hobbies / interests",
+      "Комментарий": "Comment"
+    },
+    "values": {
+      "Да": "Yes",
+      "Нет": "No",
+      "Мужской": "Male",
+      "Женский": "Female",
+      "Холост / Не замужем": "Single",
+      "Женат / Замужем": "Married"
+    },
+    "save_button": "Save profile",
+    "cities": {
+      "Москва": "Moscow",
+      "Санкт-Петербург": "Saint Petersburg"
+    }
+  },
+  "diary": {
+    "title": "Diary",
+    "today": "Today",
+    "save": "Save",
+    "mood": "Mood",
+    "period": "Period",
+    "score": "Score",
+    "clock": "Now: {now:%d.%m.%Y %H:%M}",
+    "pick_date": "Select date",
+    "chart_title": "Well-being (by date)",
+    "months_short": [
+      "Jan",
+      "Feb",
+      "Mar",
+      "Apr",
+      "May",
+      "Jun",
+      "Jul",
+      "Aug",
+      "Sep",
+      "Oct",
+      "Nov",
+      "Dec"
+    ],
+    "periods": {
+      "morning": "Morning",
+      "afternoon": "Day",
+      "evening": "Evening"
+    },
+    "errors": {
+      "save_failed": "Failed to save diary:\n{e}",
+      "delete_failed": "Failed to delete diary item"
+    }
+  },
+  "options": {
+    "title": "Settings",
+    "tts": "Speak chat answers",
+    "theme": "Theme",
+    "voice": "Chat voice",
+    "lang_ui": "Interface language",
+    "lang_chat": "Answer language",
+    "lang_content": "Context language",
+    "hint": "Changes are applied immediately after pressing “Apply”».\n“Kira” voice is best suited for languages other than Russian.",
+    "themes": {
+      "Тёмная": "Dark",
+      "Светлая": "Light"
+    }
+  },
+  "buttons": {
+    "apply": "Apply",
+    "reset": "Reset",
+    "send": "Send",
+    "clear": "Clear",
+    "ok": "OK",
+    "cancel": "Cancel"
+  },
+  "dlg": {
+    "export_profile_title": "Export profile",
+    "import_profile_title": "Import profile",
+    "export_diary_title": "Export diary",
+    "import_diary_title": "Import diary",
+    "filetype_error": "Choose: .json .xlsx .ods .csv",
+    "export_profile_failed": "Failed to export profile:\n{e}",
+    "export_diary_failed": "Failed to export diary:\n{e}",
+    "import_profile_failed": "Failed to import profile:\n{e}",
+    "import_diary_failed": "Failed to import diary:\n{e}"
+  },
+  "msg": {
+    "saved_title": "Saved",
+    "options_saved": "Settings were saved and applied.",
+    "error_title": "Error",
+    "invalid_options": "Invalid settings.",
+    "save_failed": "Failed to save settings.",
+    "ok_title": "OK",
+    "profile_exported": "Profile exported.",
+    "profile_imported": "Profile imported.",
+    "diary_exported": "Diary exported.",
+    "diary_imported": "Diary imported.",
+    "profile_import_wrong": "Profile file must be JSON (dict).",
+    "profile_format_wrong": "Data format does not match Profile.",
+    "diary_import_wrong": "Diary file must be JSON (dict).",
+    "diary_format_wrong": "Data format does not match Diary.",
+    "invalid_date": "Invalid date.",
+    "profile_saved": "Profile saved.",
+    "profile_save_failed": "Failed to save profile."
+  }
+}

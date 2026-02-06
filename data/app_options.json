@@ -1,5 +1,8 @@
 {
   "USE_TTS": true,
-  "TTS_VOICE": "Марфа",
-  "THEME": "Светлая"
+  "TTS_VOICE": "Кира",
+  "THEME": "Светлая",
+  "LANG_UI": "en",
+  "LANG_CHAT": "en",
+  "LANG_CONTENT": "en"
 }
