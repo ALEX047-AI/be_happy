@@ -17,11 +17,16 @@
     "diary": "Diary",
     "profile": "Profile",
     "options": "Settings",
-    "about": "About"
+    "about": "About",
+    "sign_in": "Sign in",
+    "sign_up": "Sign up",
+    "sign_out": "Sign out",
+    "current_account": "Current account: {username}"
   },
   "home": {
     "slogan": "You are not alone",
     "main_button": "Quick advice",
+    "main_button_text_to_chat":"Give me advice",
     "new_phrase": "New phrase",
     "disclaimer": "This is an educational app. If you need emergency help —\nplease contact local support services or someone close to you."
   },
@@ -72,6 +77,9 @@
     "score": "Score",
     "clock": "Now: {now:%d.%m.%Y %H:%M}",
     "pick_date": "Select date",
+    "pick_year": "Year",
+    "pick_month": "Month",
+    "pick_day": "Day",
     "chart_title": "Well-being (by date)",
     "months_short": [
       "Jan",
@@ -115,6 +123,9 @@
     "apply": "Apply",
     "reset": "Reset",
     "send": "Send",
+    "say": "Say",
+    "listening": "Listening…",
+    "recognizing": "Recognizing…",
     "clear": "Clear",
     "ok": "OK",
     "cancel": "Cancel"
@@ -148,5 +159,32 @@
     "invalid_date": "Invalid date.",
     "profile_saved": "Profile saved.",
     "profile_save_failed": "Failed to save profile."
+  },
+  "auth": {
+    "title": "Account",
+    "panel_title": "Account",
+    "please_sign_in": "Please sign in from the Settings page or File menu.",
+    "signed_in_as": "Signed in as: {username}",
+    "signed_out": "Signed out.",
+    "confirm_sign_out": "Sign out from the current account?",
+    "username_empty": "Username cannot be empty.",
+    "password_empty": "Password cannot be empty.",
+    "password_mismatch": "Passwords do not match.",
+    "user_not_found": "User not found.",
+    "invalid_credentials": "Wrong username or password.",
+    "user_exists": "This user already exists.",
+    "storage_error": "Storage error",
+    "sign_in_failed": "Could not sign in",
+    "create_failed": "Could not create user",
+    "migrate_plaintext": "Legacy plaintext profile and diary files were found. Migrate them into the new encrypted account?",
+    "encrypted_storage_active": "Your account (profile) information is encrypted.",
+    "username_label": "Username",
+    "username_placeholder": "Enter username",
+    "password_label": "Password",
+    "password_placeholder": "Enter password",
+    "confirm_password_label": "Confirm password",
+    "confirm_password_placeholder": "Repeat password",
+    "inline_hint": "Profile and diary data are stored in separate encrypted files for each account.",
+    "legacy_found_hint": "Plaintext data was found. Create the first account to migrate it into encrypted storage."
   }
 }

@@ -17,11 +17,16 @@
     "diary": "Tagebuch",
     "profile": "Profil",
     "options": "Einstellungen",
-    "about": "Über"
+    "about": "Über",
+    "sign_in": "Anmelden",
+    "sign_up": "Registrieren",
+    "sign_out": "Abmelden",
+    "current_account": "Aktuelles Konto: {username}"
   },
   "home": {
     "slogan": "Du bist nicht allein",
     "main_button": "Kurzer Rat",
+    "main_button_text_to_chat":"Gib mir Rat",
     "new_phrase": "Neuer Satz",
     "disclaimer": "Dies ist eine Lern-App. Wenn du dringend Hilfe brauchst —\nbitte kontaktiere lokale Hilfsdienste oder eine nahestehende Person."
   },
@@ -72,6 +77,9 @@
     "score": "Bewertung",
     "clock": "Jetzt: {now:%d.%m.%Y %H:%M}",
     "pick_date": "Datum wählen",
+    "pick_year": "Jahr",
+    "pick_month": "Monat",
+    "pick_day": "Tag",
     "chart_title": "Befinden (nach Datum)",
     "months_short": [
       "Jan",
@@ -148,5 +156,32 @@
     "invalid_date": "Ungültiges Datum.",
     "profile_saved": "Profil gespeichert.",
     "profile_save_failed": "Profil konnte nicht gespeichert werden."
+  },
+  "auth": {
+    "title": "Konto",
+    "panel_title": "Konto",
+    "please_sign_in": "Bitte melden Sie sich auf der Einstellungsseite oder über das Datei-Menü an.",
+    "signed_in_as": "Angemeldet als: {username}",
+    "signed_out": "Abgemeldet.",
+    "confirm_sign_out": "Vom aktuellen Konto abmelden?",
+    "username_empty": "Der Benutzername darf nicht leer sein.",
+    "password_empty": "Das Passwort darf nicht leer sein.",
+    "password_mismatch": "Die Passwörter stimmen nicht überein.",
+    "user_not_found": "Benutzer nicht gefunden.",
+    "invalid_credentials": "Falscher Benutzername oder falsches Passwort.",
+    "user_exists": "Dieser Benutzer existiert bereits.",
+    "storage_error": "Speicherfehler",
+    "sign_in_failed": "Anmeldung fehlgeschlagen",
+    "create_failed": "Benutzer konnte nicht erstellt werden",
+    "migrate_plaintext": "Es wurden alte unverschlüsselte Profil- und Tagebuchdateien gefunden. Sollen sie in das neue verschlüsselte Konto übernommen werden?",
+    "encrypted_storage_active": "Die Daten des Kontos (Profils) sind verschlüsselt.",
+    "username_label": "Benutzername",
+    "username_placeholder": "Benutzernamen eingeben",
+    "password_label": "Passwort",
+    "password_placeholder": "Passwort eingeben",
+    "confirm_password_label": "Passwort bestätigen",
+    "confirm_password_placeholder": "Passwort wiederholen",
+    "inline_hint": "Profil und Tagebuch werden für jedes Konto in separaten verschlüsselten Dateien gespeichert.",
+    "legacy_found_hint": "Es wurden unverschlüsselte Daten gefunden. Erstelle das erste Konto, um sie in den verschlüsselten Speicher zu übernehmen."
   }
 }

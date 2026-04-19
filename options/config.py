@@ -17,6 +17,23 @@ class Theme(BaseModel):
     FONT_SIZE: int = 14
     FONT_NAME: str = "Arial"
 
+    # Дополнительное оформление графиков Matplotlib (Дневник)
+    CHART_BG: str | None = None          # Figure фон
+    CHART_AX_BG: str | None = None       # Axes фон
+    CHART_FG: str | None = None          # Текст ticks spines
+    CHART_GRID: str | None = None        # Цвет грида
+    CHART_LINE: str | None = None        # Цвет основной линии
+    CHART_SELECTED: str | None = None    # Цвет точек выбранного дня.
+
+    # Слайдеры и Переключатели
+    SWITCH_FG: str | None = None
+    SWITCH_PROGRESS: str | None = None
+    SWITCH_BUTTON: str | None = None
+
+    SLIDER_FG: str | None = None
+    SLIDER_PROGRESS: str | None = None
+    SLIDER_BUTTON: str | None = None
+
 # список городов (должен совпадать с build_profile)
 city_list = ["Москва", "Санкт-Петербург", "Оренбург",
              'Абакан', 'Альметьевск', 'Ангарск', 'Арзамас', 'Армавир', 'Артём', 'Архангельск', 'Астрахань', 'Балаково', 'Балашиха', 'Барнаул', 'Батайск', 'Белгород', 'Бердск', 'Березники', 'Бийск', 'Благовещенск', 'Братск', 'Брянск', 'Великий Новгород', 'Видное', 'Владивосток', 'Владикавказ', 'Владимир', 'Волгоград', 'Волгодонск', 'Волжский', 'Вологда', 'Воронеж', 'Грозный', 'Дербент', 'Дзержинск', 'Димитровград', 'Долгопрудный', 'Домодедово', 'Евпатория', 'Екатеринбург', 'Ессентуки', 'Жуковский', 'Златоуст', 'Иваново', 'Ижевск', 'Иркутск', 'Йошкар-Ола', 'Казань', 'Калининград', 'Калуга', 'Каменск-Уральский', 'Камышин', 'Каспийск', 'Кемерово', 'Керчь', 'Киров', 'Кисловодск', 'Ковров', 'Коломна', 'Комсомольск-на-Амуре', 'Копейск', 'Королёв', 'Кострома', 'Красногорск', 'Краснодар', 'Красноярск', 'Курган', 'Курск', 'Кызыл', 'Липецк', 'Люберцы', 'Магнитогорск', 'Майкоп', 'Махачкала', 'Миасс', 'Михайловск', 'Мурино', 'Мурманск', 'Муром', 'Мытищи', 'Набережные Челны', 'Назрань', 'Нальчик', 'Находка', 'Невинномысск', 'Нефтекамск', 'Нефтеюганск', 'Нижневартовск', 'Нижнекамск', 'Нижний Новгород', 'Нижний Тагил', 'Новокузнецк', 'Новомосковск', 'Новороссийск', 'Новосибирск', 'Новочебоксарск', 'Новочеркасск', 'Новошахтинск', 'Новый Уренгой', 'Ногинск', 'Норильск', 'Ноябрьск', 'Обнинск', 'Одинцово', 'Октябрьский', 'Омск', 'Орехово-Зуево', 'Орск', 'Орёл', 'Пенза', 'Первоуральск', 'Пермь', 'Петрозаводск', 'Петропавловск-Камчатский', 'Подольск', 'Прокопьевск', 'Псков', 'Пушкино', 'Пятигорск', 'Раменское', 'Реутов', 'Ростов-на-Дону', 'Рубцовск', 'Рыбинск', 'Рязань', 'Салават', 'Самара', 'Саранск', 'Саратов', 'Севастополь', 'Северодвинск', 'Северск', 'Серпухов', 'Симферополь', 'Смоленск', 'Сочи', 'Ставрополь', 'Старый Оскол', 'Стерлитамак', 'Сургут', 'Сызрань', 'Сыктывкар', 'Таганрог', 'Тамбов', 'Тверь', 'Тольятти', 'Томск', 'Тула', 'Тюмень', 'Улан-Удэ', 'Ульяновск', 'Уссурийск', 'Уфа', 'Хабаровск', 'Ханты-Мансийск', 'Хасавюрт', 'Химки', 'Чебоксары', 'Челябинск', 'Череповец', 'Черкесск', 'Чита', 'Шахты', 'Щёлково', 'Электросталь', 'Элиста', 'Энгельс', 'Южно-Сахалинск', 'Якутск', 'Ярославль']
@@ -65,13 +82,13 @@ TTS_VOICES = {
         "sample": "",
         "languages": ["ru"]
     },
-    # "Kira": {
-    #     "id": "Kin_24000",
-    #     "gender": "female",
-    #     "ssml": "",
-    #     "sample": "",
-    #     "languages": ["en"]
-    # },
+    "Кира": {
+        "id": "Kin_24000",
+        "gender": "female",
+        "ssml": "",
+        "sample": "",
+        "languages": ["en"]
+    },
 }
 
 
@@ -82,6 +99,11 @@ class Settings(BaseSettings):
         USE_TTS: bool = True  # Озвучивать ответ ЛЛМ
         TTS_VOICE: str = "Марфа"  # Голос ЛЛМ - словарь # TTS_VOICES
         THEME: str = "Тёмная"  # 'Тёмная' # выбор только Темная и Светлая
+        LANG_UI: str = "ru"  # Код языка интерфейса: ru|en|it|de
+        LANG_CHAT: str = "ru"  # Код языка ответа LLM
+        LANG_CONTENT: str = "ru"  # Код языка контента (фразы/статьи)
+        POP_MSG_ON: bool = False # Оботражать информационные сообщение (Профиль сохранён)
+        ADD_LABELS: bool = False # Отображать доп информацию в виде label
         # LANGUAGE = 'russian'
         # CHAT_LANGUAGE = 'russian'
 
@@ -111,7 +133,7 @@ class Settings(BaseSettings):
     SALUTE_SYNTHESIZE_URL: str = ""
     SALUTE_RECOGNIZE_URL: str = ""
 
-    MODEL_SOURCE: str = 'mistral'  # mistral | openrouter
+    MODEL_SOURCE: str = 'gigachat'  # mistral | openrouter | gigachat
 
     OPENROUTER_API_KEY: str = ""
     OPENROUTER_BASE_URL: str = ""
@@ -124,6 +146,10 @@ class Settings(BaseSettings):
     # OPENROUTER_MODEL: str = 'google/gemma-3-27b-it:free'
     # OPENROUTER_MODEL: str = "mistralai/mistral-small-3.2-24b-instruct:free"
     #   model="mistralai/mistral-7b-instruct:free"
+
+    GIGACHAT_CREDENTIALS: str = "MDE5ZDgzMWItNTVmYy03YmFmLTgyNjgtYjViMGJjZDg4NWM5OjczNTZmODc4LTMyZDctNDQ2Yi1iN2I2LTQ1ZjQ4ZDY3NTJlYQ=="
+    GIGACHAT_MODEL: str = 'GigaChat-2-Max'
+    GIGACHAT_BASE_URL: str = "https://gigachat.devices.sberbank.ru/api/v1"
 
     MISTRAL_API_KEY: str
     MISTRAL_BASE_URL: str
@@ -155,7 +181,7 @@ class Settings(BaseSettings):
 
     # tkinter конфигурация
     TITLE: str = "TD — Treatment of Depression"
-    GEOMETRY: str = "700x600"
+    GEOMETRY: str = "700x650"
     MAIN_BTN_TEXT: str = "Быстрый совет"
     MAIN_LABEL_TEXT: str = ("Это образовательное приложение. Если Вам нужна экстренная помощь —\n"
                            "пожалуйста, обратитесь в местные службы поддержки или к близким.")
@@ -259,6 +285,16 @@ class Settings(BaseSettings):
                 opt.TTS_VOICE = "Наталья" if "Наталья" in TTS_VOICES else next(iter(TTS_VOICES.keys()), "")
             if opt.THEME not in self.THEMES:
                 opt.THEME = "Светлая" if "Светлая" in self.THEMES else self.THEMES_DEFAULT
+
+            # Коды языков
+            _langs = ("ru", "en", "it", "de")
+            if getattr(opt, "LANG_UI", None) not in _langs:
+                opt.LANG_UI = "ru"
+            if getattr(opt, "LANG_CHAT", None) not in _langs:
+                opt.LANG_CHAT = opt.LANG_UI
+            if getattr(opt, "LANG_CONTENT", None) not in _langs:
+                opt.LANG_CONTENT = opt.LANG_UI
+
 
             self.app_options = opt
 

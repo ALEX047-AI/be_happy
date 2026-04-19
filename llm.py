@@ -151,6 +151,10 @@ class LLM_IO:
         self.MISTRAL_MODEL = settings.MISTRAL_MODEL
         self.MISTRAL_TEMPERATURE = settings.MISTRAL_TEMPERATURE
 
+        self.GIGACHAT_MODEL = settings.GIGACHAT_MODEL
+        self.GIGACHAT_CREDENTIALS = settings.GIGACHAT_CREDENTIALS
+        self.GIGACHAT_BASE_URL = settings.GIGACHAT_BASE_URL
+
         self.OPENROUTER_API_KEY = settings.OPENROUTER_API_KEY
         self.OPENROUTER_BASE_URL = settings.OPENROUTER_BASE_URL
         self.OPENROUTER_MODEL = settings.OPENROUTER_MODEL
@@ -207,6 +211,14 @@ class LLM_IO:
                 model=self.MISTRAL_MODEL,
                 temperature=self.MISTRAL_TEMPERATURE,
             )
+        elif self.model_source == "gigachat":
+
+            llm_service = dict(
+                api_key=self.GIGACHAT_CREDENTIALS,
+                base_url=self.GIGACHAT_BASE_URL,
+                model=self.GIGACHAT_MODEL,
+                # temperature=self.GIGACHAT_TEMPERATURE,
+            )
         else:
             llm_service = dict(
                 api_key=self.OPENROUTER_API_KEY,
@@ -228,9 +240,17 @@ class LLM_IO:
 
 
         # llm = ChatMistralAI(
-        llm = ChatOpenAI(
-            **llm_service
-        )
+        if self.model_source == "gigachat":
+            from langchain_gigachat.chat_models import GigaChat
+            llm = GigaChat(
+                credentials=self.GIGACHAT_CREDENTIALS,
+                verify_ssl_certs=False,
+                model=self.GIGACHAT_MODEL
+                )
+        else:
+            llm = ChatOpenAI(
+                    **llm_service
+                )
 
         """knowledge_store = [
             Document(page_content="Спасибо, что делишься со мной своими мыслями и чувствами. Я очень ценю твое доверие"),
@@ -466,6 +486,19 @@ class LLM_IO:
         self._text_to_queue_event_pause.clear()
 
         if self.USE_LLM:
+            lang = self.lang_chat or "ru"
+            if lang == "en":
+                lang_text = "It is very important that you must give me the answer in English"
+            elif lang == "it":
+                lang_text = "È molto importante, devi rispondermi in italiano."
+            elif lang == "de":
+                lang_text = "Es ist sehr wichtig, du musst mir auf Deutsch antworten."
+            elif lang == "ru":
+                lang_text = "Очень важно, ты должен дать мне ответ на русском языке."
+            else:
+                lang_text = ""
+            if isinstance(question, str):
+                question = f"{question}. {lang_text}"
             count = -1
             msg_chunk_packed = ""
             msg_chunk_list = []

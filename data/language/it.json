@@ -17,11 +17,16 @@
     "diary": "Diario",
     "profile": "Profilo",
     "options": "Impostazioni",
-    "about": "Informazioni"
+    "about": "Informazioni",
+    "sign_in": "Accedi",
+    "sign_up": "Registrati",
+    "sign_out": "Esci",
+    "current_account": "Account corrente: {username}"
   },
   "home": {
     "slogan": "Non sei solo",
     "main_button": "Consiglio rapido",
+    "main_button_text_to_chat":"Dammi un consiglio",
     "new_phrase": "Nuova frase",
     "disclaimer": "Questa è un'app educativa. Se hai bisogno di aiuto urgente —\ncontatta i servizi di supporto locali o una persona vicina."
   },
@@ -72,6 +77,9 @@
     "score": "Valutazione",
     "clock": "Ora: {now:%d.%m.%Y %H:%M}",
     "pick_date": "Scegli data",
+    "pick_year": "Anno",
+    "pick_month": "Mese",
+    "pick_day": "Giorno",
     "chart_title": "Benessere (per data)",
     "months_short": [
       "Gen",
@@ -148,5 +156,32 @@
     "invalid_date": "Data non valida.",
     "profile_saved": "Profilo salvato.",
     "profile_save_failed": "Impossibile salvare il profilo."
+  },
+  "auth": {
+    "title": "Account",
+    "panel_title": "Account",
+    "please_sign_in": "Accedi dalla pagina Impostazioni o dal menu File.",
+    "signed_in_as": "Accesso effettuato come: {username}",
+    "signed_out": "Disconnessione eseguita.",
+    "confirm_sign_out": "Vuoi uscire dall’account corrente?",
+    "username_empty": "Il nome utente non può essere vuoto.",
+    "password_empty": "La password non può essere vuota.",
+    "password_mismatch": "Le password non coincidono.",
+    "user_not_found": "Utente non trovato.",
+    "invalid_credentials": "Nome utente o password non validi.",
+    "user_exists": "Questo utente esiste già.",
+    "storage_error": "Errore di archiviazione",
+    "sign_in_failed": "Impossibile accedere",
+    "create_failed": "Impossibile creare l’utente",
+    "migrate_plaintext": "Sono stati trovati vecchi file del profilo e del diario non crittografati. Vuoi trasferirli nel nuovo account crittografato?",
+    "encrypted_storage_active": "I dati dell'account (del profilo) sono crittografati.",
+    "username_label": "Nome utente",
+    "username_placeholder": "Inserisci il nome utente",
+    "password_label": "Password",
+    "password_placeholder": "Inserisci la password",
+    "confirm_password_label": "Conferma password",
+    "confirm_password_placeholder": "Ripeti la password",
+    "inline_hint": "Profilo e diario vengono salvati in file separati e crittografati per ogni account.",
+    "legacy_found_hint": "Sono stati trovati dati non crittografati. Crea il primo account per trasferirli nell’archivio crittografato."
   }
 }

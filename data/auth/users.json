@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "users": {
+    "olga1": {
+      "username": "olga1",
+      "user_id": "162dcc610047e0115ff080cd",
+      "pwd": {
+        "algo": "scrypt",
+        "salt": "5XdO8qHxQIHR/Gi7n94GyQ==",
+        "hash": "MPFT6n52qVnCi+eQn7J06j27lyaUGRw/UATBOEEpbYc=",
+        "n": 16384,
+        "r": 8,
+        "p": 1,
+        "dklen": 32
+      },
+      "enc": {
+        "algo": "fernet-pbkdf2-sha256",
+        "salt": "+i0AFmVCjDNwvbl3KN1TKQ==",
+        "iterations": 480000
+      }
+    },
+    "lit1": {
+      "username": "lit1",
+      "user_id": "080e64cff221db926b673c91",
+      "pwd": {
+        "algo": "scrypt",
+        "salt": "6f2bn63Wdm7+uPG0QRcDEA==",
+        "hash": "erWkKV/h0Aagl0eT/0S7mTIMRTBN5Rc+LxGbrCeGzF0=",
+        "n": 16384,
+        "r": 8,
+        "p": 1,
+        "dklen": 32
+      },
+      "enc": {
+        "algo": "fernet-pbkdf2-sha256",
+        "salt": "LI6loPbt4zSCnfdTSoAjlQ==",
+        "iterations": 480000
+      }
+    },
+    "oleg": {
+      "username": "oleg",
+      "user_id": "bb2feed5f90a3d02a7c70df4",
+      "pwd": {
+        "algo": "scrypt",
+        "salt": "62Kmk4FowTG79HFijolFzA==",
+        "hash": "4e0OvFRL1uv9X0HdR7qvt82EVf8k10iY8q+/Ky1uJzE=",
+        "n": 16384,
+        "r": 8,
+        "p": 1,
+        "dklen": 32
+      },
+      "enc": {
+        "algo": "fernet-pbkdf2-sha256",
+        "salt": "M2rTwiEmb6VkFGQUOjAmLQ==",
+        "iterations": 480000
+      }
+    },
+    "oleg12": {
+      "username": "oleg12",
+      "user_id": "1a53ed0255199400b4a01552",
+      "pwd": {
+        "algo": "scrypt",
+        "salt": "PcbT2Cn8rOPGn5au4i16sQ==",
+        "hash": "lsyru2v15D/twiw6AfuoxFpXBDoY0GQQpnAGtQa/sGQ=",
+        "n": 16384,
+        "r": 8,
+        "p": 1,
+        "dklen": 32
+      },
+      "enc": {
+        "algo": "fernet-pbkdf2-sha256",
+        "salt": "UCkh685ec98J7h0sXM4jhQ==",
+        "iterations": 480000
+      }
+    }
+  }
+}

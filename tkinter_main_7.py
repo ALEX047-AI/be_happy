@@ -6,22 +6,20 @@ import os
 import random
 from datetime import date
 import time
+import threading
+import tempfile
+import wave
 
 import matplotlib
 matplotlib.use("TkAgg")
 
 import tkinter as tk
-try:
-    import customtkinter as ctk
-except Exception as _e:
-    raise ImportError(
-        "customtkinter is required for this version. Install it with: pip install customtkinter"
-    ) from _e
-
+import customtkinter as ctk
+from PIL import Image
 from tkinter import messagebox
-from tkinter import filedialog
+from tkinter import filedialog, simpledialog
 
-from queue import Queue
+from queue import Queue, Empty
 from dataclasses import dataclass
 
 from options.config import settings, TTS_VOICES, city_list
@@ -30,15 +28,17 @@ from content import ContentStore
 from services.city_events import EVENTS_INFO_DYNAMIC, SharedData
 
 from articles import support_phrases
-from profile_manage import (load_profile, save_profile, crisis_keywords, load_json, save_json,
+from profile_manage import (load_profile, save_profile, load_diary, save_diary, crisis_keywords, load_json, save_json,
                             sheet_to_list, sheet_to_dict, dict_to_sheet, profile_fields, diary_fields)
+from auth_storage import auth_manager, AuthError, InvalidCredentials, UserAlreadyExists, UserNotFound, CryptoUnavailable
 from llm import LLM_IO  # get_frase_from_llm, get_frase_from_llm_stream
-from services.speech_service import SpeechPlayer, TTS_Stream
+from services.speech_service import SpeechPlayer, TTS_Stream, ASR_Stream, ASRJob, ASRResult
 from tkinter_diary import DiaryView
 from idlelib.tooltip import Hovertip
 
 DATA = settings.DATA
 DIARY_PATH = os.path.join(DATA, settings.diary_file_name)
+PROFILE_PATH = os.path.join(DATA, settings.profile_file_name)
 os.makedirs(DATA, exist_ok=True)
 
 
@@ -63,8 +63,19 @@ class TDApp(ctk.CTk):
         self.geometry(settings.GEOMETRY)
 
         self.theme_renew(settings.app_options.THEME)
-        self.profile = load_profile()
-        self.diary = load_json(DIARY_PATH, {})
+        self.auth = auth_manager
+        self.profile = {}
+        self.diary = {}
+        try:
+            self._home_auth_mode = "signin" if self.auth.has_any_user() else "signup"
+        except Exception:
+            self._home_auth_mode = "signin"
+        self._auth_username_value = ""
+        self._auth_password_value = ""
+        self._auth_confirm_value = ""
+        self.auth_username_entry = None
+        self.auth_password_entry = None
+        self.auth_confirm_entry = None
 
         # Загрузка языков
         self.lang_dir = os.path.join(settings.DATA, "language")
@@ -75,7 +86,9 @@ class TDApp(ctk.CTk):
         self.lang_ui = getattr(settings.app_options, "LANG_UI", "ru")
         self.lang_chat = getattr(settings.app_options, "LANG_CHAT", self.lang_ui)
         self.lang_content = getattr(settings.app_options, "LANG_CONTENT", self.lang_ui)
-
+        opt = settings.app_options
+        self.opt_add_labels = tk.BooleanVar()
+        self.opt_add_labels.set(value=bool(getattr(opt, "ADD_LABELS", False)))
         self.language = LanguageStore(self.lang_dir, default_lang="ru")
         self.language.load(self.lang_ui)
         self.tr = self.language.t
@@ -93,7 +106,7 @@ class TDApp(ctk.CTk):
         # customtkinter база используем fg_color вместо of bg
         try:
             if ctk is None:
-                raise RuntimeError('customtkinter is not installed')
+                raise RuntimeError('Пакет customtkinter не установлен')
             self._apply_ctk_appearance()
         except Exception:
             try:
@@ -102,15 +115,27 @@ class TDApp(ctk.CTk):
                 pass
 
         self.create_layout()
+        self._startup_auth_flow()
 
-        if not self.profile:
-            self.show_profile()
+        if self._is_signed_in():
+            if not self.profile:
+                self.show_profile()
+            else:
+                self.show_home()
         else:
             self.show_home()
 
 
         self.q_text = Queue()
         self.q_speech = Queue()
+        self.q_asr_in = Queue()
+        self.q_asr_out = Queue()
+        self.asr_stream = None
+        self._asr_recording = False  # идет запись
+        self._asr_busy = False       # идет распознование
+        self._asr_polling = False
+        self._asr_stop_event = threading.Event()
+        self._asr_rec_thread = None
         self.player = None
         self.tts_stream = None
         self.llm_item = None
@@ -234,6 +259,324 @@ class TDApp(ctk.CTk):
             # self.player.resume()
 
 
+    def _asr_lang_param(self) -> str:
+        """Возвращает язык для ASR в формате Salute ('ru-RU', 'en-US')."""
+        try:
+            lang = getattr(settings.app_options, "LANG_CHAT", None) or getattr(settings.app_options, "LANG_UI", "ru")
+        except Exception:
+            lang = "ru"
+        lang = str(lang).lower()
+        return {"ru": "ru-RU", "en": "en-US"}.get(lang, "ru-RU")
+
+    def _ensure_asr_worker(self) -> bool:
+        """Ленивая инициализация ASR worker (чтобы не падать при старте приложения)."""
+        try:
+            if self.asr_stream is not None and getattr(self.asr_stream, "is_alive", lambda: False)():
+                return True
+        except Exception:
+            pass
+
+        try:
+            self.asr_stream = ASR_Stream(self.q_asr_in, self.q_asr_out, daemon=True, finished_item=False)
+            self.asr_stream.start()
+            return True
+        except Exception as e:
+            try:
+                messagebox.showerror(self.tr("errors.asr_title","ASR"), f"{self.tr('errors.asr_init','Не удалось запустить распознавание речи')}: {e}")
+            except Exception:
+                pass
+            return False
+    def _record_mic_to_pcm_stream(
+        self,
+        *,
+        stop_event: threading.Event,
+        max_seconds: int = 59,
+        prefer_rate: int = 16000,
+        channels: int = 1,
+        silence_seconds: float = 3.0,
+        silence_rms: float = 400.0,
+        min_voice_ms: int = 200,
+    ) -> tuple[str, int, int]:
+        """
+        Запись микрофона в RAW PCM16LE (.pcm) c возможностью:
+        - остановить вручную (stop_event)
+        - авто-остановка по времени (max_seconds)
+        - авто-остановка по тишине: если после того, как пользователь начал говорить,
+          тишина длится silence_seconds секунд.
+
+        Возвращает (path, sample_rate, channels).
+        """
+        try:
+            import sounddevice as sd
+        except Exception as e:
+            raise RuntimeError(f"Пакет sounddevice недоступен: {e}")
+
+        import audioop
+
+        rates_to_try = [int(prefer_rate), 8000]  # 8k — запасной
+
+        # лимит передачи в сервис АСР (2мб - для Салют)
+        asr_audio_max_bytes = 2 * 1024 * 1024 - 4096
+
+        last_err = None
+        for sr in rates_to_try:
+            try:
+                sr = int(sr)
+                ch = int(channels)
+                if ch not in (1, 2):
+                    ch = 1
+
+                # 50мс блок — для определения тишины
+                blocksize = max(256, int(sr * 0.05))
+
+                chunks: list[bytes] = []
+                total_bytes = 0
+
+                start_ts = time.time()
+                last_voice_ts = start_ts
+                heard_voice = False
+                voice_ms_acc = 0.0
+
+                # максимально допустимый размер записи (в байтах pcm16)
+                max_bytes = min(int(sr * max_seconds * ch * 2), asr_audio_max_bytes)
+
+                def callback(indata, frames, time_info, status):
+                    nonlocal total_bytes, last_voice_ts, heard_voice, voice_ms_acc
+
+                    if stop_event.is_set():
+                        raise sd.CallbackStop
+
+                    # RawInputStream даёт bytes-like
+                    b = bytes(indata) if indata is not None else b""
+                    if not b:
+                        return
+
+                    # гарантируем кратность 2 байтам (int16)
+                    if len(b) % 2 != 0:
+                        b = b[:-1]
+                        if not b:
+                            return
+
+                    # ограничиваем размер
+                    remain = max_bytes - total_bytes
+                    if remain <= 0:
+                        stop_event.set()
+                        raise sd.CallbackStop
+                    if len(b) > remain:
+                        b = b[:remain - (remain % 2)]
+                        stop_event.set()
+
+                    chunks.append(b)
+                    total_bytes += len(b)
+
+                    now = time.time()
+
+                    # определяем речь/тишину
+                    try:
+                        rms = float(audioop.rms(b, 2))
+                    except Exception:
+                        rms = 0.0
+
+                    if rms >= float(silence_rms):
+                        last_voice_ts = now
+                        voice_ms_acc += (frames / sr) * 1000.0
+                        if voice_ms_acc >= float(min_voice_ms):
+                            heard_voice = True
+
+                    # автоостановка по времени (1 минута)
+                    if (now - start_ts) >= float(max_seconds):
+                        stop_event.set()
+                        raise sd.CallbackStop
+
+                    # автоостановка по тишине — только если уже было что-то похожее на речь
+                    if heard_voice and (now - last_voice_ts) >= float(silence_seconds):
+                        stop_event.set()
+                        raise sd.CallbackStop
+
+                with sd.RawInputStream(
+                    samplerate=sr,
+                    channels=ch,
+                    dtype="int16",
+                    blocksize=blocksize,
+                    callback=callback,
+                ):
+                    while not stop_event.is_set():
+                        sd.sleep(50)
+
+                fd, path = tempfile.mkstemp(prefix="td_asr_", suffix=".pcm")
+                os.close(fd)
+                with open(path, "wb") as f:
+                    f.write(b"".join(chunks))
+
+                return path, sr, ch
+
+            except Exception as e:
+                last_err = e
+                try:
+                    stop_event.clear()
+                except Exception:
+                    pass
+                continue
+
+        raise RuntimeError(f"Не удалось записать микрофон: {last_err}")
+
+    def _ensure_asr_polling(self):
+        if getattr(self, "_asr_polling", False):
+            return
+        self._asr_polling = True
+        self.after(200, self._poll_asr_results)
+
+    def _poll_asr_results(self):
+        try:
+            res = self.q_asr_out.get_nowait()
+        except Empty:
+            self.after(200, self._poll_asr_results)
+            return
+        except Exception:
+            self.after(200, self._poll_asr_results)
+            return
+
+        if res is None:
+            self._asr_polling = False
+            return
+
+        try:
+            if isinstance(res, ASRResult) and res.error:
+                self.append_chat(f"\n[ASR error: {res.error}]\n")
+                text = ""
+            else:
+                texts = []
+                if isinstance(res, ASRResult):
+                    texts = res.texts or []
+                elif isinstance(res, (list, tuple)):
+                    texts = list(res)
+                text = " ".join([t for t in texts if t]).strip()
+
+            self._asr_recording = False
+            self._asr_busy = False
+            try:
+                self._asr_stop_event.clear()
+            except Exception:
+                pass
+            try:
+                if hasattr(self, "say_btn") and self.say_btn is not None:
+                    self.say_btn.configure(state="normal", text=self.tr("buttons.say","Сказать"))
+            except Exception:
+                pass
+
+            if text and hasattr(self, "user_entry") and self.user_entry is not None:
+                try:
+                    self.user_entry.configure(state="normal")
+                except Exception:
+                    pass
+                self.user_entry.delete(0, tk.END)
+                self.user_entry.insert(0, text)
+                self.user_entry.focus_set()
+        finally:
+            try:
+                if self.q_asr_out.qsize() > 0:
+                    self.after(50, self._poll_asr_results)
+                    return
+            except Exception:
+                pass
+            self._asr_polling = False
+
+    def _asr_set_btn(self, *, state: str | None = None, text: str | None = None):
+        try:
+            if not hasattr(self, "say_btn") or self.say_btn is None:
+                return
+            if state is not None:
+                self.say_btn.configure(state=state)
+            if text is not None:
+                self.say_btn.configure(text=text)
+        except Exception:
+            pass
+
+    def asr_toggle(self, max_seconds: int = 59, silence_seconds: float = 3.0):
+        """
+        Кнопка "Сказать":
+        - 1-е нажатие: начинаем слушать
+        - 2-е нажатие: останавливаем запись и отправляем в ASR
+
+        Авто-стоп:
+        - по тишине silence_seconds (после того, как пользователь начал говорить)
+        - или по max_seconds.
+        """
+        if getattr(self, "_asr_busy", False):
+            return
+
+        if not getattr(self, "_asr_recording", False):
+            self._asr_start_listen(max_seconds=max_seconds, silence_seconds=silence_seconds)
+        else:
+            self._asr_stop_listen()
+
+    def _asr_start_listen(self, *, max_seconds: int = 59, silence_seconds: float = 3.0):
+        if getattr(self, "_asr_recording", False) or getattr(self, "_asr_busy", False):
+            return
+        if not self._ensure_asr_worker():
+            return
+
+        self._asr_recording = True
+        try:
+            self._asr_stop_event.clear()
+        except Exception:
+            pass
+
+        self._asr_set_btn(state="normal", text=self.tr("buttons.listening", "Слушаю…"))
+
+        def worker():
+            try:
+                path, sr, ch = self._record_mic_to_pcm_stream(
+                    stop_event=self._asr_stop_event,
+                    max_seconds=max_seconds,
+                    prefer_rate=16000,
+                    channels=1,
+                    silence_seconds=silence_seconds,
+                    silence_rms=400.0,
+                    min_voice_ms=200,
+                )
+
+                def ui_recognizing():
+                    self._asr_recording = False
+                    self._asr_busy = True
+                    self._asr_set_btn(state="disabled", text=self.tr("buttons.recognizing", "Распознаю…"))
+                self.after(0, ui_recognizing)
+
+                lang = self._asr_lang_param()
+                c_type = f"audio/x-pcm;bit=16;rate={sr}"
+                qparam = f"?language={lang}&sample_rate={sr}&channels_count={ch}"
+                self.q_asr_in.put(ASRJob(file=path, c_type=c_type, query_param=qparam, cleanup=True))
+
+                self.after(0, self._ensure_asr_polling)
+
+            except Exception as e:
+                def ui_err():
+                    self._asr_recording = False
+                    self._asr_busy = False
+                    try:
+                        self._asr_stop_event.clear()
+                    except Exception:
+                        pass
+                    self._asr_set_btn(state="normal", text=self.tr("buttons.say", "Сказать"))
+                    self.append_chat(f"\n[ASR error: {e}]\n")
+                self.after(0, ui_err)
+
+        self._asr_rec_thread = threading.Thread(target=worker, daemon=True)
+        self._asr_rec_thread.start()
+
+    def _asr_stop_listen(self):
+        """Останавливаем запись (2-е нажатие). Распознавание выполнит worker."""
+        if not getattr(self, "_asr_recording", False):
+            return
+        try:
+            self._asr_stop_event.set()
+        except Exception:
+            pass
+
+        # UI отклик сразу: пользователь нажал — мы реагируем
+        self._asr_set_btn(state="disabled", text=self.tr("buttons.recognizing", "Распознаю…"))
+        self._asr_busy = True
+
     def theme_renew(self, name=settings.app_options.THEME):
 
         self.theme = settings.THEMES.get(name) or settings.THEMES[settings.THEMES_DEFAULT] or settings.THEMES['Тёмная']
@@ -263,8 +606,1110 @@ class TDApp(ctk.CTk):
             ctk.set_appearance_mode(mode)
         except Exception:
             pass
+    try:
+        # ЗАПОЛНЕНИЕ ПРИЛОЖЕНИЯ
+        # Эффекты для кнопок: нажатие/проведение мышкой
+        @staticmethod
+        def _clamp_int(v: float, lo: int = 0, hi: int = 255) -> int:
+            try:
+                iv = int(round(float(v)))
+            except Exception:
+                iv = 0
+            return max(lo, min(hi, iv))
 
-    # ЗАПОЛНЕНИЕ ПРИЛОЖЕНИЯ
+        @classmethod
+        def _hex_to_rgb(cls, color: str):
+            if not isinstance(color, str):
+                return None
+            c = color.strip()
+            if not c:
+                return None
+            if c.startswith("#"):
+                c = c[1:]
+            if len(c) != 6:
+                return None
+            try:
+                r = int(c[0:2], 16)
+                g = int(c[2:4], 16)
+                b = int(c[4:6], 16)
+                return (r, g, b)
+            except Exception:
+                return None
+
+        @staticmethod
+        def _rgb_to_hex(rgb) -> str:
+            try:
+                r, g, b = rgb
+                return "#{:02X}{:02X}{:02X}".format(int(r), int(g), int(b))
+            except Exception:
+                return "#000000"
+
+        @classmethod
+        def _mix_hex(cls, c1: str, c2: str, t: float) -> str:
+            """Смешивает два hex-цвета: t=0 -> c1, t=1 -> c2."""
+            a = cls._hex_to_rgb(c1)
+            b = cls._hex_to_rgb(c2)
+            if a is None or b is None:
+                return c1
+            t = max(0.0, min(1.0, float(t)))
+            r = cls._clamp_int(a[0] + (b[0] - a[0]) * t)
+            g = cls._clamp_int(a[1] + (b[1] - a[1]) * t)
+            b2 = cls._clamp_int(a[2] + (b[2] - a[2]) * t)
+            return cls._rgb_to_hex((r, g, b2))
+
+        @classmethod
+        def _shift_hex(cls, c: str, amount: float) -> str:
+            """
+            Осветляет или затемняет hex-цвет.
+            amount > 0 -> светлее (к белому), amount < 0 -> темнее (к чёрному).
+            """
+            if cls._hex_to_rgb(c) is None:
+                return c
+            a = max(-1.0, min(1.0, float(amount)))
+            if a >= 0:
+                return cls._mix_hex(c, "#FFFFFF", a)
+            return cls._mix_hex(c, "#000000", -a)
+
+        @classmethod
+        def _is_dark_hex(cls, c: str) -> bool:
+            rgb = cls._hex_to_rgb(c)
+            if rgb is None:
+                return False
+            r, g, b = rgb
+            # Воспринимаемая яркость (приблизительно)
+            lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            return lum < 140
+
+        @classmethod
+        def _contrast_text_for_bg(cls, bg: str, fallback: str) -> str:
+            rgb = cls._hex_to_rgb(bg)
+            if rgb is None:
+                return fallback
+            return (settings.THEMES.get("Светлая").BG if cls._is_dark_hex(bg) else settings.THEMES.get("Тёмная").BG) if hasattr(settings, "THEMES") else fallback
+
+        @staticmethod
+        def _is_descendant(widget, ancestor) -> bool:
+            try:
+                w = widget
+                while w is not None:
+                    if w == ancestor:
+                        return True
+                    w = w.master
+            except Exception:
+                pass
+            return False
+
+        def _pointer_inside(self, widget, x_root: int, y_root: int) -> bool:
+            try:
+                w = widget.winfo_containing(x_root, y_root)
+                return self._is_descendant(w, widget)
+            except Exception:
+                return False
+
+
+        def _rel_lum(self, c: str) -> float | None:
+            """Относительная яркость для hex-цветов. Возвращает None, если цвет некорректен."""
+            rgb = self._hex_to_rgb(c)
+            if rgb is None:
+                return None
+
+            def _to_lin(v: int) -> float:
+                x = v / 255.0
+                return x / 12.92 if x <= 0.04045 else ((x + 0.055) / 1.055) ** 2.4
+
+            r, g, b = rgb
+            rl, gl, bl = _to_lin(r), _to_lin(g), _to_lin(b)
+            return 0.2126 * rl + 0.7152 * gl + 0.0722 * bl
+
+        def _contrast_ratio(self, bg: str, fg: str) -> float | None:
+            lb = self._rel_lum(bg)
+            lf = self._rel_lum(fg)
+            if lb is None or lf is None:
+                return None
+            L1, L2 = (lb, lf) if lb >= lf else (lf, lb)
+            return (L1 + 0.05) / (L2 + 0.05)
+
+        def _best_contrast(self, bg: str, c1: str, c2: str) -> str:
+            """Выбирает между c1/c2 вариант с лучшим контрастом на bg. Используются только цвета темы."""
+            r1 = self._contrast_ratio(bg, c1) or 0.0
+            r2 = self._contrast_ratio(bg, c2) or 0.0
+            return c1 if r1 >= r2 else c2
+
+        def _btn_palette_for_theme(self, theme, kind: str = "secondary") -> dict:
+            kind = (kind or "secondary").lower()
+
+            accent = theme.ACCENT
+            btn = theme.BTN
+            hover_bg = theme.ACTIVE_BG
+
+            # Возможные цвета текста: theme.FG и theme.BG
+            def _text_for(bg_hex: str) -> str:
+                return self._best_contrast(bg_hex, theme.FG, theme.BG)
+
+            if kind in ("primary", "accent"):
+                text = _text_for(accent)
+                hover = self._mix_hex(accent, text, 0.12)
+                pressed = self._mix_hex(accent, text, 0.22)
+                return {"fg": accent, "hover": hover, "pressed": pressed, "text": text}
+
+            # Вторичный / нейтральный
+            text = _text_for(btn)
+            hover = hover_bg
+            try:
+                same_hover = str(hover).strip().lower() == str(btn).strip().lower()
+            except Exception:
+                same_hover = False
+            if same_hover:
+                hover = self._mix_hex(btn, text, 0.10)
+            pressed = self._mix_hex(hover, text, 0.18)
+            return {"fg": btn, "hover": hover, "pressed": pressed, "text": text}
+
+        def _btn_palette(self, kind: str = "secondary") -> dict:
+            """Палитра для текущей темы (вычисляется из цветов темы в config.py)."""
+            return self._btn_palette_for_theme(self.theme, kind)
+
+        def _bind_ctk_button_recursively(self, btn: "ctk.CTkButton", sequence: str, func) -> None:
+            """CTkButton состоит из внутренних виджетов. Биндим на все, чтобы press/release работали везде."""
+            targets = [btn]
+            for attr in ("_canvas", "_text_label", "_image_label"):
+                try:
+                    w = getattr(btn, attr, None)
+                    if w is not None:
+                        targets.append(w)
+                except Exception:
+                    pass
+            try:
+                for ch in btn.winfo_children():
+                    if ch not in targets:
+                        targets.append(ch)
+            except Exception:
+                pass
+
+            for w in targets:
+                try:
+                    w.bind(sequence, func, add="+")
+                except Exception:
+                    pass
+
+        def _apply_ctk_button_effects(self, btn: "ctk.CTkButton", kind: str = "secondary") -> None:
+            """
+            Единый стиль для CTkButton:
+            - цвет наведения (встроенный)
+            - эффект нажатия (mouse down/up)
+            """
+            pal = self._btn_palette(kind)
+            try:
+                btn.configure(
+                    fg_color=pal["fg"],
+                    hover_color=pal["hover"],
+                    text_color=pal["text"],
+                )
+            except Exception:
+                return
+
+            normal = pal["fg"]
+            hover = pal["hover"]
+            pressed = pal["pressed"]
+
+            def _is_disabled() -> bool:
+                try:
+                    return str(btn.cget("state")).lower() == "disabled"
+                except Exception:
+                    return False
+
+            def on_press(event):
+                if _is_disabled():
+                    return
+                try:
+                    btn.configure(fg_color=pressed)
+                except Exception:
+                    pass
+
+            def on_release(event):
+                if _is_disabled():
+                    return
+                inside = self._pointer_inside(btn, getattr(event, "x_root", 0), getattr(event, "y_root", 0))
+                try:
+                    btn.configure(fg_color=(hover if inside else normal))
+                except Exception:
+                    pass
+
+            def on_leave(event):
+                if _is_disabled():
+                    return
+                try:
+                    btn.configure(fg_color=normal)
+                except Exception:
+                    pass
+
+            try:
+                self._bind_ctk_button_recursively(btn, "<ButtonPress-1>", on_press)
+                self._bind_ctk_button_recursively(btn, "<ButtonRelease-1>", on_release)
+                self._bind_ctk_button_recursively(btn, "<Leave>", on_leave)
+            except Exception:
+                pass
+
+            # Тень (тема-ориентированная, не влияет на макет)
+            try:
+                self._apply_ctk_button_shadow(btn, kind=kind)
+            except Exception:
+                pass
+
+        def _apply_ctk_optionmenu_effects(self, menu: "ctk.CTkOptionMenu", kind: str = "secondary") -> None:
+            """Эффект наведения/нажатия для CTkOptionMenu с учётом темы (например, Город / Настройки)."""
+            base_fg = self.BTN
+            base_btn = self.ACCENT
+            text = self._best_contrast(base_fg, self.FG, self.BG)
+            btn_text = self._best_contrast(base_btn, self.FG, self.BG)
+            hover_btn = self._mix_hex(base_btn, btn_text, 0.12)
+            pressed_btn = self._mix_hex(base_btn, btn_text, 0.22)
+
+            try:
+                menu.configure(
+                    fg_color=base_fg,
+                    button_color=base_btn,
+                    button_hover_color=hover_btn,
+                    text_color=text,
+                    dropdown_fg_color=self.PANEL,
+                    dropdown_hover_color=self.ACTIVE_BG,
+                    dropdown_text_color=self.FG,
+                )
+            except Exception:
+                return
+
+            def _is_disabled() -> bool:
+                try:
+                    return str(menu.cget("state")).lower() == "disabled"
+                except Exception:
+                    return False
+
+            def on_enter(_event):
+                if _is_disabled():
+                    return
+                try:
+                    menu.configure(button_color=hover_btn)
+                except Exception:
+                    pass
+
+            def on_leave(_event):
+                if _is_disabled():
+                    return
+                try:
+                    menu.configure(button_color=base_btn)
+                except Exception:
+                    pass
+
+            def on_press(_event):
+                if _is_disabled():
+                    return
+                try:
+                    menu.configure(button_color=pressed_btn)
+                except Exception:
+                    pass
+
+            def on_release(event):
+                if _is_disabled():
+                    return
+                inside = self._pointer_inside(menu, getattr(event, "x_root", 0), getattr(event, "y_root", 0))
+                try:
+                    menu.configure(button_color=(hover_btn if inside else base_btn))
+                except Exception:
+                    pass
+
+            try:
+                self._bind_ctk_button_recursively(menu, "<Enter>", on_enter)
+                self._bind_ctk_button_recursively(menu, "<Leave>", on_leave)
+                self._bind_ctk_button_recursively(menu, "<ButtonPress-1>", on_press)
+                self._bind_ctk_button_recursively(menu, "<ButtonRelease-1>", on_release)
+            except Exception:
+                pass
+
+        def _apply_ctk_slider_effects(self, slider: "ctk.CTkSlider") -> None:
+            """Эффект наведения/нажатия для ползунка CTkSlider (например, Дети)."""
+            base_fg = getattr(self.theme, "SLIDER_FG", None) or self.ACTIVE_BG
+            base_progress = getattr(self.theme, "SLIDER_PROGRESS", None) or self.ACCENT
+            base_button = getattr(self.theme, "SLIDER_BUTTON", None) or self.ACCENT
+            btn_text = self._best_contrast(base_button, self.FG, self.BG)
+            hover_button = self._mix_hex(base_button, btn_text, 0.12)
+            pressed_button = self._mix_hex(base_button, btn_text, 0.22)
+            try:
+                slider.configure(
+                    fg_color=base_fg,
+                    progress_color=base_progress,
+                    button_color=base_button,
+                    button_hover_color=hover_button,
+                )
+            except Exception:
+                return
+
+            def on_enter(_event):
+                try:
+                    slider.configure(button_color=hover_button)
+                except Exception:
+                    pass
+
+            def on_leave(_event):
+                try:
+                    slider.configure(button_color=base_button)
+                except Exception:
+                    pass
+
+            def on_press(_event):
+                try:
+                    slider.configure(button_color=pressed_button)
+                except Exception:
+                    pass
+
+            def on_release(event):
+                inside = self._pointer_inside(slider, getattr(event, "x_root", 0), getattr(event, "y_root", 0))
+                try:
+                    slider.configure(button_color=(hover_button if inside else base_button))
+                except Exception:
+                    pass
+
+            try:
+                self._bind_ctk_button_recursively(slider, "<Enter>", on_enter)
+                self._bind_ctk_button_recursively(slider, "<Leave>", on_leave)
+                self._bind_ctk_button_recursively(slider, "<ButtonPress-1>", on_press)
+                self._bind_ctk_button_recursively(slider, "<ButtonRelease-1>", on_release)
+            except Exception:
+                pass
+
+
+        def _pointer_inside(self, widget, x_root: int, y_root: int) -> bool:
+            try:
+                w = widget.winfo_containing(x_root, y_root)
+                return self._is_descendant(w, widget)
+            except Exception:
+                return False
+
+        def mk_btn(self, parent, text: str, cmd, *, kind: str = "secondary", icon: str | None = None, icon_size: int = 18, **kwargs):
+            """
+            Фабрика для CTkButton с:
+            - цветами с учётом темы (из тем config.py)
+            - эффектом наведения и нажатия
+            - необязательными PNG-иконками, загружаемыми из DATA/png
+
+            Иконки используются только если явно переданы через icon=... .
+            Автоматическое сопоставление unicode-символов не используется.
+            """
+            kw = dict(
+                master=parent,
+                text=text,
+                command=cmd,
+            )
+            kw.update(kwargs)
+            kw.setdefault("corner_radius", 10)
+            kw.setdefault("height", 38)
+
+            if icon and ("image" not in kw):
+                icon_img = self._get_btn_icon(icon, size=icon_size)
+                if icon_img is not None:
+                    kw["image"] = icon_img
+                    if text:
+                        kw.setdefault("compound", "left")
+                    else:
+                        kw["text"] = ""
+
+            btn = ctk.CTkButton(**kw)
+            self._apply_ctk_button_effects(btn, kind=kind)
+            return btn
+
+        def mk_icon_btn(self, parent, cmd, *, icon: str, kind: str = "secondary", icon_size: int = 18, **kwargs):
+            """Для кнопок с PNG-картинками."""
+            kwargs.setdefault("width", 44)
+            return self.mk_btn(
+                parent,
+                "",
+                cmd,
+                kind=kind,
+                icon=icon,
+                icon_size=icon_size,
+                **kwargs,
+            )
+
+
+        def _icon_candidates(self, name: str) -> list[str]:
+            name = (name or "").strip().lower()
+            mapping = {
+                "pause": ["pause-button.png", "pause.png"],
+                "play": ["play-button.png", "play.png"],
+                "stop": ["stop-button.png", "stop.png"],
+                "calendar": ["calendar.png", "calendar(1).png"],
+                "microphone": ["microphone.png", "mic.png"],
+            }
+            return mapping.get(name, [f"{name}.png"])
+
+        def _get_btn_icon(self, name: str, *, size: int = 18):
+            """Загружает и кэширует PNG-иконки из DATA/png. Рисование/генерация иконок не используется."""
+            try:
+                cache = getattr(self, "_td_icon_cache", None)
+                if cache is None:
+                    cache = {}
+                    setattr(self, "_td_icon_cache", cache)
+                key = (name, int(size))
+                if key in cache:
+                    return cache[key]
+            except Exception:
+                cache = None
+
+            icon_dir = os.path.join(DATA, "png")
+            path = None
+            for fname in self._icon_candidates(name):
+                fp = os.path.join(icon_dir, fname)
+                if os.path.exists(fp):
+                    path = fp
+                    break
+
+            if path is None:
+                return None
+
+            try:
+                img = Image.open(path)
+                if getattr(img, "mode", None) not in ("RGBA", "LA"):
+                    img = img.convert("RGBA")
+                icon = ctk.CTkImage(light_image=img, dark_image=img, size=(int(size), int(size)))
+                if cache is not None:
+                    try:
+                        cache[key] = icon
+                    except Exception:
+                        pass
+                return icon
+            except Exception:
+                return None
+
+        def _apply_tk_button_effects(self, btn: "tk.Button", kind: str = "secondary") -> None:
+            """Та же идея, что и для CTk-кнопок, но для классического tk.Button (используется в выборе даты)."""
+            pal = self._btn_palette(kind)
+
+            normal = pal["fg"]
+            hover = pal["hover"]
+            pressed = pal["pressed"]
+            text = pal["text"]
+
+            try:
+                btn.configure(
+                    bg=normal,
+                    fg=text,
+                    activebackground=hover,
+                    activeforeground=text,
+                    relief="flat",
+                    highlightthickness=0,
+                    bd=0,
+                )
+            except Exception:
+                return
+
+            def on_enter(_):
+                try:
+                    btn.configure(bg=hover)
+                except Exception:
+                    pass
+
+            def on_leave(_):
+                try:
+                    btn.configure(bg=normal)
+                except Exception:
+                    pass
+
+            def on_press(_):
+                try:
+                    btn.configure(bg=pressed)
+                except Exception:
+                    pass
+
+            def on_release(event):
+                inside = True
+                try:
+                    inside = (btn.winfo_containing(event.x_root, event.y_root) is not None)
+                except Exception:
+                    pass
+                try:
+                    btn.configure(bg=(hover if inside else normal))
+                except Exception:
+                    pass
+
+            try:
+                btn.bind("<Enter>", on_enter, add="+")
+                btn.bind("<Leave>", on_leave, add="+")
+                btn.bind("<ButtonPress-1>", on_press, add="+")
+                btn.bind("<ButtonRelease-1>", on_release, add="+")
+            except Exception:
+                pass
+            # Тень для классического tk.Button
+            try:
+                self._apply_tk_button_shadow(btn)
+            except Exception:
+                pass
+
+
+
+        # Тень для кнопок + вспомогательные функции для видимости всплывающих окон
+
+        @staticmethod
+        def _tk_safe_color(c: str, fallback: str) -> str:
+            """Виджеты Tk не поддерживают значение 'transparent'. Оставляем безопасные цвета для Linux/Windows."""
+            try:
+                if not isinstance(c, str):
+                    return fallback
+                s = c.strip()
+                if not s:
+                    return fallback
+                if s.lower() == "transparent":
+                    return fallback
+                return s
+            except Exception:
+                return fallback
+
+        def _shadow_base_color(self) -> str:
+            """Подбирает мягкий цвет тени только из цветов темы (без магических констант)."""
+            bg = self.BG
+            if self._hex_to_rgb(bg) is None:
+                bg = self.PANEL
+
+            # Выбираем самую тёмную доступную поверхность темы как целевую для тени
+            candidates = []
+            for c in (self.BG, self.PANEL, self.BTN, self.ACTIVE_BG):
+                if self._hex_to_rgb(c) is not None:
+                    candidates.append(c)
+            if not candidates:
+                return bg
+
+            def _lum(c):
+                return self._rel_lum(c) if hasattr(self, "_rel_lum") else 0.0
+
+            target = min(candidates, key=lambda c: (_lum(c) if _lum(c) is not None else 0.0))
+
+            t = 0.55 if self._is_dark_hex(bg) else 0.22
+            return self._mix_hex(bg, target, t)
+
+        def _apply_ctk_button_shadow(self, btn: "ctk.CTkButton", kind: str = "secondary", *, offset=(2, 2)) -> None:
+            """Добавляет тень за CTkButton без изменения его менеджера геометрии (pack/grid)."""
+            try:
+                sh = getattr(btn, "_td_shadow", None)
+                if sh is not None and sh.winfo_exists():
+                    try:
+                        sh.configure(fg_color=self._shadow_base_color())
+                    except Exception:
+                        pass
+                    return
+            except Exception:
+                pass
+
+            parent = getattr(btn, "master", None)
+            if parent is None:
+                return
+
+            try:
+                radius = int(btn.cget("corner_radius"))
+            except Exception:
+                radius = 10
+
+            shadow_color = self._shadow_base_color()
+            try:
+                sh = ctk.CTkFrame(parent, fg_color=shadow_color, corner_radius=radius)
+            except Exception:
+                return
+
+            try:
+                setattr(btn, "_td_shadow", sh)
+            except Exception:
+                pass
+
+            dx, dy = offset
+
+            def _sync(_evt=None):
+                try:
+                    if not btn.winfo_exists() or not sh.winfo_exists():
+                        return
+                except Exception:
+                    return
+                try:
+                    if not btn.winfo_ismapped():
+                        btn.after(20, _sync)
+                        return
+                except Exception:
+                    pass
+                try:
+                    x, y = btn.winfo_x(), btn.winfo_y()
+                    w, h = btn.winfo_width(), btn.winfo_height()
+                    if w <= 1 or h <= 1:
+                        btn.after(20, _sync)
+                        return
+                    sh.place(x=x + dx, y=y + dy, width=w, height=h)
+                    try:
+                        sh.lower(btn)
+                    except Exception:
+                        try:
+                            sh.lower()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            def _cleanup(_evt=None):
+                try:
+                    if sh.winfo_exists():
+                        sh.destroy()
+                except Exception:
+                    pass
+
+            try:
+                btn.bind("<Configure>", _sync, add="+")
+                btn.bind("<Map>", lambda e: btn.after(1, _sync), add="+")
+                btn.bind("<Destroy>", _cleanup, add="+")
+            except Exception:
+                pass
+
+            try:
+                btn.after(1, _sync)
+            except Exception:
+                pass
+
+        def _apply_tk_button_shadow(self, btn: "tk.Button", *, offset=(2, 2)) -> None:
+            """Тень для классического tk.Button (используется в окнах выбора даты)."""
+            try:
+                sh = getattr(btn, "_td_shadow", None)
+                if sh is not None and sh.winfo_exists():
+                    try:
+                        sh.configure(bg=self._shadow_base_color())
+                    except Exception:
+                        pass
+                    return
+            except Exception:
+                pass
+
+            parent = getattr(btn, "master", None)
+            if parent is None:
+                return
+
+            shadow_color = self._shadow_base_color()
+            try:
+                sh = tk.Frame(parent, bg=shadow_color, highlightthickness=0, bd=0)
+            except Exception:
+                return
+
+            try:
+                setattr(btn, "_td_shadow", sh)
+            except Exception:
+                pass
+
+            dx, dy = offset
+
+            def _sync(_evt=None):
+                try:
+                    if not btn.winfo_exists() or not sh.winfo_exists():
+                        return
+                except Exception:
+                    return
+                try:
+                    if not btn.winfo_ismapped():
+                        btn.after(20, _sync)
+                        return
+                except Exception:
+                    pass
+                try:
+                    x, y = btn.winfo_x(), btn.winfo_y()
+                    w, h = btn.winfo_width(), btn.winfo_height()
+                    if w <= 1 or h <= 1:
+                        btn.after(20, _sync)
+                        return
+                    sh.place(x=x + dx, y=y + dy, width=w, height=h)
+                    try:
+                        sh.lower(btn)
+                    except Exception:
+                        try:
+                            sh.lower()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            def _cleanup(_evt=None):
+                try:
+                    if sh.winfo_exists():
+                        sh.destroy()
+                except Exception:
+                    pass
+
+            try:
+                btn.bind("<Configure>", _sync, add="+")
+                btn.bind("<Map>", lambda e: btn.after(1, _sync), add="+")
+                btn.bind("<Destroy>", _cleanup, add="+")
+            except Exception:
+                pass
+
+            try:
+                btn.after(1, _sync)
+            except Exception:
+                pass
+
+        def _popup_front(self, top: "tk.Toplevel") -> None:
+            """В Linux/Ubuntu некоторые оконные менеджеры открывают диалоги позади главного окна."""
+            try:
+                top.transient(self)
+            except Exception:
+                pass
+            try:
+                top.lift()
+                top.focus_force()
+            except Exception:
+                pass
+            try:
+                top.attributes("-topmost", True)
+                top.after(180, lambda: top.attributes("-topmost", False))
+            except Exception:
+                pass
+
+
+        def _is_signed_in(self) -> bool:
+            try:
+                return bool(self.auth.is_signed_in())
+            except Exception:
+                return False
+
+        def _legacy_profile_path(self) -> str:
+            return PROFILE_PATH
+
+        def _legacy_diary_path(self) -> str:
+            return DIARY_PATH
+
+        def _require_signed_in(self, *, show_message: bool = True) -> bool:
+            if self._is_signed_in():
+                return True
+            if show_message:
+                messagebox.showinfo(
+                    self.tr("auth.title", "Аккаунт"),
+                    self.tr("auth.please_sign_in", "Войдите через страницу «Настройки» или меню «Файл»."),
+                )
+            return False
+
+        def _load_legacy_plain_data(self):
+            profile_data = load_json(self._legacy_profile_path(), {})
+            diary_data = load_json(self._legacy_diary_path(), {})
+            if not isinstance(profile_data, dict):
+                profile_data = {}
+            if not isinstance(diary_data, dict):
+                diary_data = {}
+            return profile_data, diary_data
+
+        def _unique_backup_path(self, path: str) -> str:
+            base = f"{path}.bak"
+            if not os.path.exists(base):
+                return base
+            idx = 1
+            while True:
+                candidate = f"{path}.bak{idx}"
+                if not os.path.exists(candidate):
+                    return candidate
+                idx += 1
+
+        def _backup_legacy_plain_files(self) -> None:
+            for path in (self._legacy_profile_path(), self._legacy_diary_path()):
+                if os.path.exists(path):
+                    try:
+                        os.replace(path, self._unique_backup_path(path))
+                    except Exception:
+                        pass
+
+        def _sync_session_state_after_sign_in(self, *, show_message: bool = True) -> None:
+            self.profile = load_profile()
+            self.diary = load_diary(default={})
+            if not isinstance(self.profile, dict):
+                self.profile = {}
+            if not isinstance(self.diary, dict):
+                self.diary = {}
+
+            self._user_city = self.profile.get('Город')
+
+            try:
+                self.refresh_profile_ui()
+            except Exception:
+                pass
+
+            if hasattr(self, "diary_view") and self.diary_view is not None:
+                self.diary_view.diary = self.diary
+                try:
+                    self.diary_view.refresh_chart()
+                except Exception:
+                    pass
+
+            try:
+                self.renew_chat(clean_llm_history=False)
+            except Exception:
+                pass
+
+            if hasattr(self, "llm_item") and self.llm_item is not None:
+                try:
+                    self.update_llm_profile()
+                except Exception:
+                    pass
+
+            try:
+                self.tk_renew_events()
+            except Exception:
+                pass
+
+            self.create_menu()
+
+            try:
+                self.build_home()
+            except Exception:
+                pass
+            try:
+                self.build_options()
+            except Exception:
+                pass
+
+            if show_message:
+                messagebox.showinfo(
+                    self.tr("auth.title", "Аккаунт"),
+                    self.tr("auth.signed_in_as", "Вы вошли как: {username}", username=self.auth.current_user() or ""),
+                )
+
+        def _sync_session_state_after_sign_out(self, *, show_message: bool = True) -> None:
+            self.profile = {}
+            self.diary = {}
+            self._user_city = None
+
+            try:
+                self.refresh_profile_ui()
+            except Exception:
+                pass
+
+            if hasattr(self, "diary_view") and self.diary_view is not None:
+                self.diary_view.diary = self.diary
+                try:
+                    self.diary_view.refresh_chart()
+                except Exception:
+                    pass
+
+            try:
+                self.renew_chat(clean_llm_history=True)
+            except Exception:
+                pass
+
+            if hasattr(self, "llm_item") and self.llm_item is not None:
+                try:
+                    self.llm_item.update_profile({})
+                    self.llm_item.clear_history()
+                except Exception:
+                    pass
+
+            self.create_menu()
+
+            try:
+                self.build_home()
+            except Exception:
+                pass
+            try:
+                self.build_options()
+            except Exception:
+                pass
+
+            if show_message:
+                messagebox.showinfo(
+                    self.tr("auth.title", "Аккаунт"),
+                    self.tr("auth.signed_out", "Вы вышли из аккаунта."),
+                )
+
+        def _menu_sign_in(self):
+            self._set_home_auth_mode("signin", focus=True)
+
+        def _menu_sign_up(self):
+            self._set_home_auth_mode("signup", focus=True)
+
+        def _menu_sign_out(self):
+            if not self._is_signed_in():
+                return
+            if messagebox.askyesno(
+                self.tr("auth.title", "Аккаунт"),
+                self.tr("auth.confirm_sign_out", "Выйти из текущего аккаунта?"),
+            ):
+                self.auth.sign_out()
+                self._clear_auth_form(keep_username=True)
+                self._sync_session_state_after_sign_out(show_message=self.opt_pop_msg_on.get())
+                self.show_options()
+
+        def _auth_menu_action(self):
+            if self._is_signed_in():
+                self._menu_sign_out()
+            else:
+                self._menu_sign_in()
+
+        def _clear_auth_form(self, *, keep_username: bool = True) -> None:
+            if not keep_username:
+                self._auth_username_value = ""
+            self._auth_password_value = ""
+            self._auth_confirm_value = ""
+
+            try:
+                if self.auth_password_entry is not None:
+                    self.auth_password_entry.delete(0, tk.END)
+            except Exception:
+                pass
+            try:
+                if self.auth_confirm_entry is not None:
+                    self.auth_confirm_entry.delete(0, tk.END)
+            except Exception:
+                pass
+
+        def _focus_auth_input(self) -> None:
+            target = self.auth_username_entry or self.auth_password_entry
+            try:
+                if target is not None:
+                    target.focus_set()
+                    target.icursor("end")
+            except Exception:
+                pass
+
+        def _set_home_auth_mode(self, mode: str = "signin", *, focus: bool = False) -> None:
+            self._home_auth_mode = "signup" if mode == "signup" else "signin"
+            try:
+                self.build_options()
+            except Exception:
+                pass
+            self.show_options()
+            if focus:
+                self.after(80, self._focus_auth_input)
+
+        def _submit_home_auth(self, mode: str | None = None) -> bool:
+            mode = (mode or self._home_auth_mode or "signin").strip().lower()
+            is_signup = mode == "signup"
+            title = self.tr("auth.title", "Аккаунт")
+
+            username = self._auth_username_value
+            password = self._auth_password_value
+            confirm = self._auth_confirm_value
+
+            try:
+                if self.auth_username_entry is not None:
+                    username = self.auth_username_entry.get().strip()
+                if self.auth_password_entry is not None:
+                    password = self.auth_password_entry.get()
+                if self.auth_confirm_entry is not None:
+                    confirm = self.auth_confirm_entry.get()
+            except Exception:
+                pass
+
+            self._auth_username_value = username
+            self._auth_password_value = password
+            self._auth_confirm_value = confirm
+
+            if not username:
+                messagebox.showerror(title, self.tr("auth.username_empty", "Имя пользователя не может быть пустым."))
+                self.after(50, self._focus_auth_input)
+                return False
+            if not password:
+                messagebox.showerror(title, self.tr("auth.password_empty", "Пароль не может быть пустым."))
+                try:
+                    if self.auth_password_entry is not None:
+                        self.auth_password_entry.focus_set()
+                except Exception:
+                    pass
+                return False
+
+            if not is_signup:
+                try:
+                    self.auth.sign_in(username, password)
+                    self._clear_auth_form(keep_username=True)
+                    self._sync_session_state_after_sign_in(show_message=self.opt_pop_msg_on.get())
+                    if not self.profile:
+                        self.show_profile()
+                    else:
+                        self.show_options()
+                    return True
+                except UserNotFound:
+                    messagebox.showerror(title, self.tr("auth.user_not_found", "Пользователь не найден."))
+                except InvalidCredentials:
+                    messagebox.showerror(title, self.tr("auth.invalid_credentials", "Неверное имя пользователя или пароль."))
+                except CryptoUnavailable as e:
+                    messagebox.showerror(title, str(e))
+                except Exception as e:
+                    messagebox.showerror(title, f"{self.tr('auth.sign_in_failed', 'Не удалось войти')}: {e}")
+
+                self._auth_password_value = ""
+                self._auth_confirm_value = ""
+                try:
+                    if self.auth_password_entry is not None:
+                        self.auth_password_entry.delete(0, tk.END)
+                        self.auth_password_entry.focus_set()
+                except Exception:
+                    pass
+                return False
+
+            if password != confirm:
+                messagebox.showerror(title, self.tr("auth.password_mismatch", "Пароли не совпадают."))
+                try:
+                    if self.auth_confirm_entry is not None:
+                        self.auth_confirm_entry.focus_set()
+                except Exception:
+                    pass
+                return False
+
+            try:
+                if self.auth.user_exists(username):
+                    messagebox.showerror(title, self.tr("auth.user_exists", "Такой пользователь уже существует."))
+                    try:
+                        if self.auth_username_entry is not None:
+                            self.auth_username_entry.focus_set()
+                    except Exception:
+                        pass
+                    return False
+            except Exception as e:
+                messagebox.showerror(title, f"{self.tr('auth.storage_error', 'Storage error')}: {e}")
+                return False
+
+            migrate_plain = False
+            try:
+                if (not self.auth.has_any_user()) and self.auth.legacy_plaintext_exists(self._legacy_profile_path(), self._legacy_diary_path()):
+                    migrate_plain = messagebox.askyesno(
+                        title,
+                        self.tr("auth.migrate_plaintext", "Найдены старые незашифрованные файлы профиля и дневника. Перенести их в новый зашифрованный аккаунт?"),
+                    )
+            except Exception:
+                migrate_plain = False
+
+            profile_data, diary_data = ({}, {})
+            if migrate_plain:
+                profile_data, diary_data = self._load_legacy_plain_data()
+
+            try:
+                self.auth.register_user(username, password, profile_data=profile_data, diary_data=diary_data)
+                self.auth.sign_in(username, password)
+                self._clear_auth_form(keep_username=True)
+                self._sync_session_state_after_sign_in(show_message=self.opt_pop_msg_on.get())
+                if migrate_plain:
+                    self._backup_legacy_plain_files()
+                if not self.profile:
+                    self.show_profile()
+                else:
+                    self.show_options()
+                return True
+            except UserAlreadyExists:
+                messagebox.showerror(title, self.tr("auth.user_exists", "Такой пользователь уже существует."))
+            except CryptoUnavailable as e:
+                messagebox.showerror(title, str(e))
+            except Exception as e:
+                messagebox.showerror(title, f"{self.tr('auth.create_failed', 'Не удалось создать пользователя')}: {e}")
+            return False
+
+        def _open_auth_dialog(self, *, allow_create: bool = True) -> bool:
+            try:
+                has_users = self.auth.has_any_user()
+            except Exception:
+                has_users = True
+            target_mode = "signup" if allow_create and not has_users else "signin"
+            self._set_home_auth_mode(target_mode, focus=True)
+            return False
+
+        def _startup_auth_flow(self) -> None:
+            try:
+                self._home_auth_mode = "signin" if self.auth.has_any_user() else "signup"
+            except Exception:
+                self._home_auth_mode = "signin"
+    except:
+        ...
 
     def create_layout(self):
         self.create_menu()
@@ -296,7 +1741,7 @@ class TDApp(ctk.CTk):
         self.diary_view = DiaryView(
             parent=self.frames["diary"],
             diary=self.diary,
-            save_callback=lambda d: save_json(DIARY_PATH, d),
+            save_callback=lambda d: save_diary(d),
             theme=self.theme,
             calendar_func=self.open_birthdate_picker,
             tr=self.tr,
@@ -325,7 +1770,7 @@ class TDApp(ctk.CTk):
         self.diary_view = DiaryView(
             parent=self.frames["diary"],
             diary=self.diary,
-            save_callback=lambda d: save_json(DIARY_PATH, d),
+            save_callback=lambda d: save_diary(d),
             theme=self.theme,
             calendar_func=self.open_birthdate_picker,
             tr=self.tr,
@@ -359,6 +1804,8 @@ class TDApp(ctk.CTk):
             messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("dlg.export_profile_failed","Не удалось экспортировать профиль:\n{e}", e=e))
 
     def export_profile(self, initialfile=None):
+        if not self._require_signed_in():
+            return
 
         if initialfile is None:
             initialfile = f'Профиль {self.profile.get("Имя", "Пользователя")}'
@@ -410,6 +1857,8 @@ class TDApp(ctk.CTk):
             messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("dlg.export_diary_failed","Не удалось экспортировать дневник:\n{e}", e=e))
 
     def export_diary(self, initialfile=None):
+        if not self._require_signed_in():
+            return
         if initialfile is None:
             initialfile = f'Дневник {self.profile.get("Имя", "Пользователя")}'
 
@@ -487,6 +1936,8 @@ class TDApp(ctk.CTk):
             messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("dlg.import_profile_failed","Не удалось импортировать профиль:\n{e}", e=e))
 
     def import_profile(self):
+        if not self._require_signed_in():
+            return
         path = filedialog.askopenfilename(
             title=self.tr("dlg.import_profile_title","Импорт профиля (ods csv xlsx json)"),
             filetypes=[("Тип файла:", ['*.ods', '*.csv', '*.xlsx', "*.json"])]
@@ -547,7 +1998,7 @@ class TDApp(ctk.CTk):
                 messagebox.showinfo("OK", message)
                 raise ValueError(message)
             self.diary = data
-            save_json(DIARY_PATH, self.diary)  # так же обновляем данные на диске
+            save_diary(self.diary)  # так же обновляем данные на диске
 
             # обновляем данные о дневнике во вкладке
             if hasattr(self, "diary_view") and self.diary_view is not None:
@@ -560,6 +2011,8 @@ class TDApp(ctk.CTk):
             messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("dlg.import_diary_failed","Не удалось импортировать дневник:\n{e}", e=e))
 
     def import_diary(self):
+        if not self._require_signed_in():
+            return
         path = filedialog.askopenfilename(
             title=self.tr("dlg.import_diary_title","Импорт дневника (ods csv xlsx json)"),
             filetypes=[
@@ -596,7 +2049,7 @@ class TDApp(ctk.CTk):
                     return
 
             self.diary = data
-            save_json(DIARY_PATH, self.diary)  # сохраняем в стандартное место приложения
+            save_diary(self.diary)  # сохраняем в зашифрованное хранилище текущего пользователя
 
             if hasattr(self, "diary_view") and self.diary_view is not None:
                 self.diary_view.diary = self.diary
@@ -618,6 +2071,18 @@ class TDApp(ctk.CTk):
         file_menu.add_command(label=self.tr("menu.export_diary", "Экспорт Дневника"), command=self.export_diary)
         file_menu.add_command(label=self.tr("menu.import_diary", "Импорт Дневника"), command=self.import_diary)
         file_menu.add_separator()
+
+        if self._is_signed_in():
+            file_menu.add_command(
+                label=self.tr("menu.current_account", "Текущий аккаунт: {username}", username=self.auth.current_user() or ""),
+                state="disabled",
+            )
+            file_menu.add_command(label=self.tr("menu.sign_out", "Выйти"), command=self._menu_sign_out)
+        else:
+            file_menu.add_command(label=self.tr("menu.sign_in", "Войти"), command=self._menu_sign_in)
+            file_menu.add_command(label=self.tr("menu.sign_up", "Зарегистрироваться"), command=self._menu_sign_up)
+
+        file_menu.add_separator()
         file_menu.add_command(label=self.tr("menu.exit", "Выход"), underline=0, command=self.destroy)
         menubar.add_cascade(label=self.tr("menu.file", "Файл"), menu=file_menu)
 
@@ -630,19 +2095,6 @@ class TDApp(ctk.CTk):
         menubar.add_command(label=self.tr("menu.about", "О проекте"), underline=0, command=self.show_about)
 
         self.config(menu=menubar)
-
-        """ self.bind_all("<Control-Cyrillic_ghe>", lambda e: self.show_home())
-        self.bind_all("<Control-u>", lambda e: self.show_home())
-        self.bind_all("<Control-c>", lambda e: self.show_chat())
-        self.bind_all("<Control-d>", lambda e: self.show_diary())
-        self.bind_all("<Control-p>", lambda e: self.show_profile())
-        self.bind_all("<Control-a>", lambda e: self.show_about())
-        self.bind_all("<Control-e>", lambda e: self.destroy()) """
-
-        # self.bind_all("<KeyPress>", self.on_ctrl_shortcuts)
-        # self.bind_all("<KeyPress>", lambda e: print(e.keysym, repr(e.char), e.state))
-
-        # обработка горячих главиш
         self.bind_all("<Control-KeyPress>", self.on_ctrl_shortcuts)
 
     def on_ctrl_shortcuts(self, e):
@@ -735,7 +2187,6 @@ class TDApp(ctk.CTk):
             except Exception:
                 pass
 
-        # Фон страницы
         try:
             f.configure(fg_color=self.BG)
         except Exception:
@@ -760,7 +2211,6 @@ class TDApp(ctk.CTk):
         self.quote_label.pack(pady=(0, 16), padx=24)
 
         def refresh_quote():
-            # меняем фразу случайным образом.
             phrase = random.choice(self.content_store.get_support_phrases(self.lang_content) or support_phrases)
             self._home_quote = phrase
             try:
@@ -768,27 +2218,36 @@ class TDApp(ctk.CTk):
             except Exception:
                 pass
 
-        ctk.CTkButton(
+        self.mk_btn(
             f,
             text=self.tr("home.main_button", settings.MAIN_BTN_TEXT),
-            command=self.show_chat_and_get_answer,
-            fg_color=self.ACCENT,
-            hover_color=self.ACCENT,
-            text_color=self.FG,
-            corner_radius=10,
+            cmd=self.show_chat_and_get_answer,
+            kind="primary",
             height=38,
         ).pack(pady=(8, 10))
 
-        ctk.CTkButton(
+        self.mk_btn(
             f,
             text=self.tr("home.new_phrase", "Новая фраза"),
-            command=refresh_quote,
-            fg_color=self.BTN,
-            hover_color=self.ACTIVE_BG,
-            text_color=self.FG,
-            corner_radius=10,
+            cmd=refresh_quote,
+            kind="secondary",
             height=34,
         ).pack(pady=(0, 8))
+
+        if self._is_signed_in():
+            top_note = self.tr("auth.signed_in_as", "Вы вошли как: {username}", username=self.auth.current_user() or "")
+        else:
+            top_note = self.tr("auth.please_sign_in", "Сначала войдите через страницу «Настройки» или меню «Файл».")
+
+        if True: #self.opt_add_labels.get():
+            ctk.CTkLabel(
+                f,
+                text=top_note,
+                wraplength=720,
+                justify="center",
+                font=(self.FONT_NAME, 12),
+                text_color=self.LABEL_FG,
+            ).pack(pady=(12, 14), padx=24)
 
         ctk.CTkLabel(
             f,
@@ -806,6 +2265,8 @@ class TDApp(ctk.CTk):
     # ДНЕВНИК
 
     def show_diary(self):
+        if not self._require_signed_in():
+            return
         self.diary_view.refresh_chart()
         self.raise_frame("diary")
 
@@ -937,62 +2398,56 @@ class TDApp(ctk.CTk):
         block1 = ctk.CTkFrame(btn_area, fg_color="transparent")
         block1.pack(fill="x")
 
-        block1.grid_columnconfigure(0, weight=1)
-        block1.grid_columnconfigure(1, weight=1)
+        block1.grid_columnconfigure(0, weight=1, uniform="btns")
+        block1.grid_columnconfigure(1, weight=1, uniform="btns")
 
-        def mk_btn(parent, text, cmd, *, kind="primary", font=None, width=None):
-            kw = dict(
-                master=parent,
-                text=text,
-                command=cmd,
-                corner_radius=10,
-                height=38,
-            )
-            if width is not None:
-                kw["width"] = width
-            if font is not None:
-                kw["font"] = font
+        # Кнопки: единый стиль + эффекты (hover + pressed)
 
-            btn = ctk.CTkButton(**kw)
-            if kind == "primary":
-                btn.configure(fg_color=self.ACCENT, hover_color=self.ACCENT, text_color=self.FG)
-            else:
-                btn.configure(fg_color=self.BTN, hover_color=self.ACTIVE_BG, text_color=self.FG)
-            return btn
+        self.send_btn  = self.mk_btn(block1, self.tr("buttons.send","Отправить"), self.send_message, kind="primary")
+        self.clear_btn = self.mk_btn(block1, self.tr("buttons.clear","Очистить"), self.renew_chat, kind="secondary")
+        # self.send_btn.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        # self.clear_btn.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        self.send_btn.grid(row=0, column=0, sticky="ew", padx=4)
+        self.clear_btn.grid(row=0, column=1, sticky="ew", padx=4)
 
-        self.send_btn  = mk_btn(block1, self.tr("buttons.send","Отправить"), self.send_message, kind="primary")
-        self.clear_btn = mk_btn(block1, self.tr("buttons.clear","Очистить"), self.renew_chat, kind="secondary")
-        self.send_btn.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        self.clear_btn.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        # Голосовой ввод (ASR)
+        if self.lang_chat in ('ru', 'en'):
+            block1.grid_columnconfigure(2, weight=1, uniform="btns")
+            self.say_btn = self.mk_btn(block1, self.tr("buttons.say","Сказать"), lambda: self.asr_toggle(max_seconds=59, silence_seconds=3.0), kind="primary", icon="microphone")
+            # self.say_btn.grid(row=1, column=2, sticky="ew", padx=(10, 0))
+            # self.say_btn.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+            self.say_btn.grid(row=0, column=2, sticky="ew", padx=4)
 
-        # 2й блок - контрль плеера.
+        # 2й блок - контроль плеера
         block2 = ctk.CTkFrame(btn_area, fg_color="transparent")
         block2.pack(fill="x", pady=(10, 0))
 
-        block2.grid_columnconfigure((0, 1, 2), weight=1)
+        block2.grid_columnconfigure(0, weight=1, uniform="player")
+        block2.grid_columnconfigure(1, weight=1, uniform="player")
+        block2.grid_columnconfigure(2, weight=1, uniform="player")
 
         icon_font = (self.FONT_NAME, 18, "bold")
-        self.pause_btn  = mk_btn(block2, "⏸", self.player_pause, kind="primary", font=icon_font, width=52)
-        self.resume_btn = mk_btn(block2, "▶", self.player_resume, kind="primary", font=icon_font, width=52)
-        self.stop_btn   = mk_btn(block2, "⏹", self.player_stop, kind="primary", font=icon_font, width=52)
 
-        # Уменьшаем высоту кнопочек
+        self.pause_btn = self.mk_icon_btn(block2, self.player_pause, kind="primary", icon="pause", icon_size=18, font=icon_font, width=52)
+        self.resume_btn = self.mk_icon_btn(block2, self.player_resume, kind="primary", icon="play", icon_size=18, font=icon_font, width=52)
+        self.stop_btn = self.mk_icon_btn(block2, self.player_stop, kind="primary", icon="stop", icon_size=18, font=icon_font, width=52)
+
         for b in (self.pause_btn, self.resume_btn, self.stop_btn):
             try:
                 b.configure(height=34)
             except Exception:
                 pass
 
-        self.pause_btn.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        self.resume_btn.grid(row=0, column=1, sticky="ew", padx=8)
-        self.stop_btn.grid(row=0, column=2, sticky="ew", padx=(8, 0))
-
+        self.pause_btn.grid(row=0, column=0, sticky="ew", padx=4)
+        self.resume_btn.grid(row=0, column=1, sticky="ew", padx=4)
+        self.stop_btn.grid(row=0, column=2, sticky="ew", padx=4)
         # Всплывающие подсказки
         try:
-            Hovertip(self.clear_btn,  "Очистка чата и истории общения.", hover_delay=500)
-            Hovertip(self.pause_btn,  "Приостановить воспроизведение", hover_delay=500)
-            Hovertip(self.resume_btn, "Продолжить воспроизведение", hover_delay=500)
-            Hovertip(self.stop_btn,   "Продолжит воспроизведение только после нового ответа", hover_delay=500)
+            Hovertip(self.clear_btn,  self.tr("tips.clear_chat","Очистка чата и истории общения."), hover_delay=500)
+            Hovertip(self.say_btn, self.tr("tips.say","Нажмите, говорите. Нажмите ещё раз, чтобы остановить. Авто-стоп по тишине ~3 сек."), hover_delay=500)
+            Hovertip(self.pause_btn,  self.tr("tips.pause","Приостановить воспроизведение"), hover_delay=500)
+            Hovertip(self.resume_btn, self.tr("tips.resume","Продолжить воспроизведение"), hover_delay=500)
+            Hovertip(self.stop_btn,   self.tr("tips.stop","Остановить. Продолжит воспроизведение только после нового ответа"), hover_delay=500)
         except Exception:
             pass
 
@@ -1080,16 +2535,20 @@ class TDApp(ctk.CTk):
         self._chatbox_set_state("disabled")
 
     def show_chat(self):
+        if not self._require_signed_in():
+            return
         self.raise_frame("chat")
         self._chatbox_set_state("disabled")
         self.user_entry.focus_set()
 
     def show_chat_and_get_answer(self):
+        if not self._require_signed_in():
+            return
         self.raise_frame("chat")
         self._chatbox_set_state("disabled")
         self.user_entry.focus_set()
         delay_ms = 10
-        self.after(delay_ms, lambda: self.send_message(default_msg='Дай мне совет'))
+        self.after(delay_ms, lambda: self.send_message(default_msg=self.tr("home.main_button_text_to_chat", 'Дай мне совет')))
 
 
     # ПРОФИЛЬ
@@ -1226,15 +2685,7 @@ class TDApp(ctk.CTk):
                 values=list(city_display_values) if city_allowed else [""],
                 variable=self.city_var,
             )
-            self.city_menu.configure(
-                fg_color=self.BTN,
-                button_color=self.ACCENT,
-                button_hover_color=self.ACCENT,
-                text_color=self.FG,
-                dropdown_fg_color=self.PANEL,
-                dropdown_hover_color=self.ACTIVE_BG,
-                dropdown_text_color=self.FG,
-            )
+            self._apply_ctk_optionmenu_effects(self.city_menu, kind="secondary")
             self.city_menu.grid(row=2, column=1, sticky="w", pady=6)
         except Exception:
             ctk.CTkEntry(
@@ -1265,18 +2716,20 @@ class TDApp(ctk.CTk):
         except Exception:
             pass
 
-        ctk.CTkButton(
+        pick_btn = self.mk_icon_btn(
             birth_row,
-            text="📅",
+            self.open_birthdate_picker,
+            kind="primary",
+            icon="calendar",
+            icon_size=18,
             width=44,
             height=34,
-            corner_radius=10,
-            fg_color=self.ACCENT,
-            hover_color=self.ACCENT,
-            text_color=self.FG,
-            command=self.open_birthdate_picker,
-        ).grid(row=0, column=1, padx=(10, 0))
-
+        )
+        pick_btn.grid(row=0, column=1, padx=(10, 0))
+        try:
+            Hovertip(pick_btn, self.tr("tips.pick_date","Выбрать дату"), hover_delay=500)
+        except Exception:
+            pass
         label(4, fld("Семейное положение"))
         marital_frame = ctk.CTkFrame(form, fg_color="transparent")
         marital_frame.grid(row=4, column=1, sticky="w", pady=6)
@@ -1338,6 +2791,10 @@ class TDApp(ctk.CTk):
             self.children_slider.set(children_default)
         except Exception:
             pass
+        try:
+            self._apply_ctk_slider_effects(self.children_slider)
+        except Exception:
+            pass
 
         self.children_value_lbl = ctk.CTkLabel(children_row, textvariable=self.children_var, width=40, text_color=self.FG)
         self.children_value_lbl.grid(row=0, column=1, padx=(10, 0))
@@ -1360,14 +2817,11 @@ class TDApp(ctk.CTk):
         self.hobby_text = textbox(9, fld("Хобби, интересы"), "Хобби, интересы", 90)
         self.comment_text = textbox(10, fld("Комментарий"), "Комментарий", 120)
 
-        ctk.CTkButton(
+        self.mk_btn(
             content,
             text=self.tr("profile.save_button","Сохранить профиль"),
-            command=self.save_profile_data,
-            fg_color=self.ACCENT,
-            hover_color=self.ACCENT,
-            text_color=self.FG,
-            corner_radius=10,
+            cmd=self.save_profile_data,
+            kind="primary",
             height=38,
         ).pack(pady=(14, 18))
 
@@ -1375,8 +2829,13 @@ class TDApp(ctk.CTk):
     def open_birthdate_picker_0(self):
         top = tk.Toplevel(self)
         top.title("Выбор даты рождения")
-        top.configure(bg=self.BG)
+        # безопасные цвета для Tk + показываем окно поверх (Linux/Ubuntu)
+        bg = self._tk_safe_color(self.BG, self.BG)
+        if self._hex_to_rgb(bg) is None:
+            bg = self._tk_safe_color(self.PANEL, self.PANEL)
+        top.configure(bg=bg)
         top.resizable(False, False)
+        self._popup_front(top)
         top.grab_set()
 
         today = date.today()
@@ -1398,24 +2857,29 @@ class TDApp(ctk.CTk):
         m = max(1, min(12, m))
         d = max(1, min(31, d))
 
-        tk.Label(top, text="Год:", fg=self.FG, bg=self.BG).grid(row=0, column=0, padx=10, pady=10, sticky="e")
-        tk.Label(top, text="Месяц:", fg=self.FG, bg=self.BG).grid(row=1, column=0, padx=10, pady=10, sticky="e")
-        tk.Label(top, text="День:", fg=self.FG, bg=self.BG).grid(row=2, column=0, padx=10, pady=10, sticky="e")
+        # цвета для Tk (на Linux некоторые темы не любят 'transparent')
+        fg = self._tk_safe_color(self.FG, self.FG)
+        btn_bg = self._tk_safe_color(self.BTN, self.BTN)
+        insert_fg = fg
+
+        tk.Label(top, text="Год:", fg=fg, bg=bg).grid(row=0, column=0, padx=10, pady=10, sticky="e")
+        tk.Label(top, text="Месяц:", fg=fg, bg=bg).grid(row=1, column=0, padx=10, pady=10, sticky="e")
+        tk.Label(top, text="День:", fg=fg, bg=bg).grid(row=2, column=0, padx=10, pady=10, sticky="e")
 
         year_var = tk.IntVar(value=y)
         month_var = tk.IntVar(value=m)
         day_var = tk.IntVar(value=d)
 
         tk.Spinbox(top, from_=year_min, to=year_max, textvariable=year_var, width=8,
-                   bg=self.BTN, fg=self.FG, insertbackground=self.FG, relief="flat")\
+                   bg=btn_bg, fg=fg, insertbackground=insert_fg, relief="flat")\
             .grid(row=0, column=1, padx=10, pady=10, sticky="w")
 
         tk.Spinbox(top, from_=1, to=12, textvariable=month_var, width=8,
-                   bg=self.BTN, fg=self.FG, insertbackground=self.FG, relief="flat")\
+                   bg=btn_bg, fg=fg, insertbackground=insert_fg, relief="flat")\
             .grid(row=1, column=1, padx=10, pady=10, sticky="w")
 
         tk.Spinbox(top, from_=1, to=31, textvariable=day_var, width=8,
-                   bg=self.BTN, fg=self.FG, insertbackground=self.FG, relief="flat")\
+                   bg=btn_bg, fg=fg, insertbackground=insert_fg, relief="flat")\
             .grid(row=2, column=1, padx=10, pady=10, sticky="w")
 
         def is_valid_date(yy, mm, dd):
@@ -1437,19 +2901,27 @@ class TDApp(ctk.CTk):
             self.birth_var.set(f"{yy:04d}-{mm:02d}-{dd:02d}")
             top.destroy()
 
-        btns = tk.Frame(top, bg=self.BG)
+        btns = tk.Frame(top, bg=bg)
         btns.grid(row=3, column=0, columnspan=2, pady=(5, 12))
 
-        tk.Button(btns, text="OK", command=set_date, bg=self.ACCENT, fg=self.FG, relief="flat", padx=14, pady=6)\
-            .pack(side="left", padx=8)
-        tk.Button(btns, text="Отмена", command=top.destroy, bg=self.BTN, fg=self.FG, relief="flat", padx=14, pady=6)\
-            .pack(side="left", padx=8)
+        ok_btn = tk.Button(btns, text=self.tr("buttons.ok","OK"), command=set_date, padx=14, pady=6)
+        self._apply_tk_button_effects(ok_btn, kind="primary")
+        ok_btn.pack(side="left", padx=8)
+
+        cancel_btn = tk.Button(btns, text=self.tr("buttons.cancel","Отмена"), command=top.destroy, padx=14, pady=6)
+        self._apply_tk_button_effects(cancel_btn, kind="secondary")
+        cancel_btn.pack(side="left", padx=8)
 
     def open_birthdate_picker(self, title="Выбор даты", year_min=1900, year_max_shift=10, check_more_then_today=True, current=None, callback=None):
         top = tk.Toplevel(self)
         top.title(title)
-        top.configure(bg=self.BG)
+        # безопасные цвета для Tk + показываем окно поверх (Linux/Ubuntu)
+        bg = self._tk_safe_color(self.BG, self.BG)
+        if self._hex_to_rgb(bg) is None:
+            bg = self._tk_safe_color(self.PANEL, self.PANEL)
+        top.configure(bg=bg)
         top.resizable(False, False)
+        self._popup_front(top)
         top.grab_set()
 
         today = date.today()
@@ -1476,24 +2948,29 @@ class TDApp(ctk.CTk):
         m = max(1, min(12, m))
         d = max(1, min(31, d))
 
-        tk.Label(top, text="Год:", fg=self.FG, bg=self.BG).grid(row=0, column=0, padx=10, pady=10, sticky="e")
-        tk.Label(top, text="Месяц:", fg=self.FG, bg=self.BG).grid(row=1, column=0, padx=10, pady=10, sticky="e")
-        tk.Label(top, text="День:", fg=self.FG, bg=self.BG).grid(row=2, column=0, padx=10, pady=10, sticky="e")
+        # цвета для Tk (на Linux некоторые темы не любят 'transparent')
+        fg = self._tk_safe_color(self.FG, self.FG)
+        btn_bg = self._tk_safe_color(self.BTN, self.BTN)
+        insert_fg = fg
+
+        tk.Label(top, text=self.tr("diary.pick_year","Год:"), fg=fg, bg=bg).grid(row=0, column=0, padx=10, pady=10, sticky="e")
+        tk.Label(top, text=self.tr("diary.pick_month","Месяц:"), fg=fg, bg=bg).grid(row=1, column=0, padx=10, pady=10, sticky="e")
+        tk.Label(top, text=self.tr("diary.pick_day","День:"), fg=fg, bg=bg).grid(row=2, column=0, padx=10, pady=10, sticky="e")
 
         year_var = tk.IntVar(value=y)
         month_var = tk.IntVar(value=m)
         day_var = tk.IntVar(value=d)
 
         tk.Spinbox(top, from_=year_min, to=year_max, textvariable=year_var, width=8,
-                   bg=self.BTN, fg=self.FG, insertbackground=self.FG, relief="flat")\
+                   bg=btn_bg, fg=fg, insertbackground=insert_fg, relief="flat")\
             .grid(row=0, column=1, padx=10, pady=10, sticky="w")
 
         tk.Spinbox(top, from_=1, to=12, textvariable=month_var, width=8,
-                   bg=self.BTN, fg=self.FG, insertbackground=self.FG, relief="flat")\
+                   bg=btn_bg, fg=fg, insertbackground=insert_fg, relief="flat")\
             .grid(row=1, column=1, padx=10, pady=10, sticky="w")
 
         tk.Spinbox(top, from_=1, to=31, textvariable=day_var, width=8,
-                   bg=self.BTN, fg=self.FG, insertbackground=self.FG, relief="flat")\
+                   bg=btn_bg, fg=fg, insertbackground=insert_fg, relief="flat")\
             .grid(row=2, column=1, padx=10, pady=10, sticky="w")
 
         def is_valid_date(yy, mm, dd, check_more_then_today=check_more_then_today):
@@ -1519,15 +2996,20 @@ class TDApp(ctk.CTk):
                 callback(date(yy, mm, dd))
             top.destroy()
 
-        btns = tk.Frame(top, bg=self.BG)
+        btns = tk.Frame(top, bg=bg)
         btns.grid(row=3, column=0, columnspan=2, pady=(5, 12))
 
-        tk.Button(btns, text="OK", command=set_date, bg=self.ACCENT, fg=self.FG, relief="flat", padx=14, pady=6)\
-            .pack(side="left", padx=8)
-        tk.Button(btns, text="Отмена", command=top.destroy, bg=self.BTN, fg=self.FG, relief="flat", padx=14, pady=6)\
-            .pack(side="left", padx=8)
+        ok_btn = tk.Button(btns, text=self.tr("buttons.ok","OK"), command=set_date, padx=14, pady=6)
+        self._apply_tk_button_effects(ok_btn, kind="primary")
+        ok_btn.pack(side="left", padx=8)
+
+        cancel_btn = tk.Button(btns, text=self.tr("buttons.cancel","Отмена"), command=top.destroy, padx=14, pady=6)
+        self._apply_tk_button_effects(cancel_btn, kind="secondary")
+        cancel_btn.pack(side="left", padx=8)
 
     def save_profile_data(self):
+        if not self._require_signed_in():
+            return
         data = {
             "Имя": self.name_var.get().strip(),
             "Пол": (getattr(self, "_profile_value_to_ru", None) or {}).get(self.gender_var.get().strip(), self.gender_var.get().strip()),
@@ -1552,12 +3034,16 @@ class TDApp(ctk.CTk):
 
             self.update_llm_profile()
             self.tk_renew_events()
-            messagebox.showinfo(self.tr("msg.saved_title","Сохранено"), self.tr("msg.profile_saved","Профиль сохранён."))
+            self.opt_use_asr_var
+            if self.opt_pop_msg_on.get():
+                messagebox.showinfo(self.tr("msg.saved_title","Сохранено"), self.tr("msg.profile_saved","Профиль сохранён."))
             self.show_home()
         else:
             messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("msg.profile_save_failed","Не удалось сохранить профиль."))
 
     def show_profile(self):
+        if not self._require_signed_in():
+            return
         self.raise_frame("profile")
 
     def refresh_profile_ui(self):
@@ -1634,6 +3120,8 @@ class TDApp(ctk.CTk):
 
         opt = settings.app_options
         self.opt_use_asr_var.set(value=bool(getattr(opt, "USE_TTS", True)))
+        self.opt_pop_msg_on.set(value=bool(getattr(opt, "POP_MSG_ON", False)))
+        self.opt_add_labels.set(value=bool(getattr(opt, "ADD_LABELS", False)))
         theme_key = self.normalize_text_for_ui(getattr(opt, "THEME", theme_list[0]), theme_list)
         theme_name = (getattr(self, "_theme_key_to_name", None) or {}).get(theme_key, theme_key)
         self.opt_theme_var.set(value=theme_name)
@@ -1671,12 +3159,25 @@ class TDApp(ctk.CTk):
         except Exception:
             pass
 
-        ctk.CTkLabel(
-            f,
-            text=self.tr("options.title", "Настройки"),
-            font=(self.FONT_NAME, 18, "bold"),
-            text_color=self.FG,
-        ).pack(pady=(16, 8))
+        if True: #self.opt_add_labels.get():
+            ctk.CTkLabel(
+                f,
+                text=self.tr("options.title", "Настройки"),
+                font=(self.FONT_NAME, 18, "bold"),
+                text_color=self.FG,
+            ).pack(pady=(16, 8))
+        else:
+            ctk.CTkLabel(
+                f,
+                text="",
+                font=(self.FONT_NAME, 1, "bold"),
+                text_color=self.FG,
+            ).pack(pady=(1, 1))
+
+        # делаем страницу настроек полностью scrollable
+        _, content = self.make_scrollable(f)
+
+        self._build_auth_settings_panel(content)
 
         # варианты выбора из
         theme_keys = tuple(settings.THEMES.keys()) or (settings.THEMES_DEFAULT,) or ("Тёмная",)
@@ -1709,6 +3210,8 @@ class TDApp(ctk.CTk):
         voice_display_values = [self._voice_key_to_name[k] for k in voice_keys]
 
         self.opt_use_asr_var = tk.BooleanVar()
+        self.opt_pop_msg_on = tk.BooleanVar()
+        # self.opt_add_labels = tk.BooleanVar()
         self.opt_theme_var = tk.StringVar()
         self.opt_voice_var = tk.StringVar()
         self.opt_lang_ui_var = tk.StringVar()
@@ -1716,13 +3219,13 @@ class TDApp(ctk.CTk):
         self.opt_lang_content_var = tk.StringVar()
         self.load_option_from_config(theme_keys, voice_keys)
 
-        form = ctk.CTkFrame(f, fg_color="transparent")
-        form.pack(padx=20, pady=10, fill="x")
+        form = ctk.CTkFrame(content, fg_color="transparent")
+        form.pack(padx=20, pady=(0, 10), fill="x")
         form.grid_columnconfigure(0, weight=0)
         form.grid_columnconfigure(1, weight=1)
 
         def label(row, text):
-            ctk.CTkLabel(form, text=text + ":", text_color=self.FG, anchor="w")                .grid(row=row, column=0, sticky="w", padx=(0, 12), pady=8)
+            ctk.CTkLabel(form, text=text + ":", text_color=self.FG, anchor="w").grid(row=row, column=0, sticky="w", padx=(0, 12), pady=8)
 
         # озвучивать ответ в чате
         label(0, self.tr("options.tts", "Озвучивать ответ в чате"))
@@ -1750,15 +3253,7 @@ class TDApp(ctk.CTk):
         label(1, self.tr("options.theme", "Тема оформления"))
         self.opt_theme_menu = ctk.CTkOptionMenu(form, values=list(theme_display_values), variable=self.opt_theme_var)
         try:
-            self.opt_theme_menu.configure(
-                fg_color=self.BTN,
-                button_color=self.ACCENT,
-                button_hover_color=self.ACCENT,
-                text_color=self.FG,
-                dropdown_fg_color=self.PANEL,
-                dropdown_hover_color=self.ACTIVE_BG,
-                dropdown_text_color=self.FG,
-            )
+            self._apply_ctk_optionmenu_effects(self.opt_theme_menu, kind="secondary")
         except Exception:
             pass
         self.opt_theme_menu.grid(row=1, column=1, sticky="w", pady=8)
@@ -1766,15 +3261,7 @@ class TDApp(ctk.CTk):
         label(2, self.tr("options.voice", "Голос чата"))
         self.opt_voice_menu = ctk.CTkOptionMenu(form, values=list(voice_display_values), variable=self.opt_voice_var)
         try:
-            self.opt_voice_menu.configure(
-                fg_color=self.BTN,
-                button_color=self.ACCENT,
-                button_hover_color=self.ACCENT,
-                text_color=self.FG,
-                dropdown_fg_color=self.PANEL,
-                dropdown_hover_color=self.ACTIVE_BG,
-                dropdown_text_color=self.FG,
-            )
+            self._apply_ctk_optionmenu_effects(self.opt_voice_menu, kind="secondary")
         except Exception:
             pass
         self.opt_voice_menu.grid(row=2, column=1, sticky="w", pady=8)
@@ -1782,15 +3269,7 @@ class TDApp(ctk.CTk):
         label(3, self.tr("options.lang_ui", "Язык интерфейса"))
         self.opt_lang_ui_menu = ctk.CTkOptionMenu(form, values=list(lang_display_values), variable=self.opt_lang_ui_var)
         try:
-            self.opt_lang_ui_menu.configure(
-                fg_color=self.BTN,
-                button_color=self.ACCENT,
-                button_hover_color=self.ACCENT,
-                text_color=self.FG,
-                dropdown_fg_color=self.PANEL,
-                dropdown_hover_color=self.ACTIVE_BG,
-                dropdown_text_color=self.FG,
-            )
+            self._apply_ctk_optionmenu_effects(self.opt_lang_ui_menu, kind="secondary")
         except Exception:
             pass
         self.opt_lang_ui_menu.grid(row=3, column=1, sticky="w", pady=8)
@@ -1798,16 +3277,8 @@ class TDApp(ctk.CTk):
         label(4, self.tr("options.lang_chat", "Язык ответов (LLM)"))
         self.opt_lang_chat_menu = ctk.CTkOptionMenu(form, values=list(lang_display_values), variable=self.opt_lang_chat_var)
         try:
-            self.opt_lang_chat_menu.configure(
-                fg_color=self.BTN,
-                button_color=self.ACCENT,
-                button_hover_color=self.ACCENT,
-                text_color=self.FG,
-                dropdown_fg_color=self.PANEL,
-                dropdown_hover_color=self.ACTIVE_BG,
-                dropdown_text_color=self.FG,
-                state="disabled",          # state=ctk.DISABLED
-            )
+            self._apply_ctk_optionmenu_effects(self.opt_lang_chat_menu, kind="secondary")
+            self.opt_lang_chat_menu.configure(state="disabled")
         except Exception:
             pass
         self.opt_lang_chat_menu.grid(row=4, column=1, sticky="w", pady=8)
@@ -1815,51 +3286,36 @@ class TDApp(ctk.CTk):
         label(5, self.tr("options.lang_content", "Язык контента"))
         self.opt_lang_content_menu = ctk.CTkOptionMenu(form, values=list(lang_display_values), variable=self.opt_lang_content_var)
         try:
-            self.opt_lang_content_menu.configure(
-                fg_color=self.BTN,
-                button_color=self.ACCENT,
-                button_hover_color=self.ACCENT,
-                text_color=self.FG,
-                dropdown_fg_color=self.PANEL,
-                dropdown_hover_color=self.ACTIVE_BG,
-                dropdown_text_color=self.FG,
-                state="disabled",          # state=ctk.DISABLED
-            )
+            self._apply_ctk_optionmenu_effects(self.opt_lang_content_menu, kind="secondary")
+            self.opt_lang_content_menu.configure(state="disabled")
         except Exception:
             pass
         self.opt_lang_content_menu.grid(row=5, column=1, sticky="w", pady=8)
 
-
-        btns = ctk.CTkFrame(f, fg_color="transparent")
+        btns = ctk.CTkFrame(content, fg_color="transparent")
         btns.pack(pady=(10, 6))
 
-        ctk.CTkButton(
+        self.mk_btn(
             btns,
             text=self.tr("buttons.apply", "Применить"),
-            command=self.save_options_data,
-            fg_color=self.ACCENT,
-            hover_color=self.ACCENT,
-            text_color=self.FG,
-            corner_radius=10,
+            cmd=self.save_options_data,
+            kind="primary",
             height=38,
             width=160,
         ).pack(side="left", padx=10)
 
-        ctk.CTkButton(
+        self.mk_btn(
             btns,
             text=self.tr("buttons.reset", "Вернуть"),
-            command=self.load_option_from_config,
-            fg_color=self.BTN,
-            hover_color=self.ACTIVE_BG,
-            text_color=self.FG,
-            corner_radius=10,
+            cmd=self.load_option_from_config,
+            kind="secondary",
             height=38,
             width=140,
         ).pack(side="left", padx=10)
 
         ctk.CTkLabel(
-            f,
-            text=self.tr("options.hint","Изменения применяются сразу после нажатия «Применить».") ,
+            content,
+            text=self.tr("options.hint", "Изменения применяются сразу после нажатия «Применить»."),
             text_color=self.LABEL_FG,
             font=(self.FONT_NAME, 10),
             justify="center",
@@ -1961,8 +3417,8 @@ class TDApp(ctk.CTk):
                 self.rebuild_ui(keep_page="options")
             except Exception:
                 pass
-
-            messagebox.showinfo(self.tr("msg.saved_title","Сохранено"), self.tr("msg.options_saved","Настройки сохранены и применены."))
+            if self.opt_pop_msg_on.get():
+                messagebox.showinfo(self.tr("msg.saved_title","Сохранено"), self.tr("msg.options_saved","Настройки сохранены и применены."))
         else:
             messagebox.showerror(self.tr("msg.error_title","Ошибка"), self.tr("msg.save_failed","Не удалось сохранить настройки."))
 
@@ -1984,6 +3440,198 @@ class TDApp(ctk.CTk):
         voice_list = tuple(TTS_VOICES.keys()) or ("Наталья",)
 
         self.load_option_from_config(theme_list, voice_list)
+
+
+    def _build_auth_settings_panel(self, parent):
+        self.auth_username_entry = None
+        self.auth_password_entry = None
+        self.auth_confirm_entry = None
+
+        auth_wrap = ctk.CTkFrame(parent, fg_color=self.BG, corner_radius=0)
+        auth_wrap.pack(padx=20, pady=(4, 8), fill="x")
+
+
+        if self._is_signed_in():
+            ctk.CTkLabel(
+                auth_wrap,
+                text=self.tr("auth.panel_title", "Аккаунт"),
+                font=(self.FONT_NAME, 16, "bold"),
+                text_color=self.FG,
+                anchor="w",
+                justify="left",
+            ).pack(fill="x", padx=4, pady=(0, 8))
+
+            ctk.CTkLabel(
+                auth_wrap,
+                text=self.tr("auth.signed_in_as", "Вы вошли как: {username}", username=self.auth.current_user() or ""),
+                font=(self.FONT_NAME, self.FONT_SIZE),
+                text_color=self.FG,
+                anchor="w",
+                justify="left",
+            ).pack(fill="x", padx=4, pady=(0, 6))
+
+            ctk.CTkLabel(
+                auth_wrap,
+                text=self.tr("auth.encrypted_storage_active", "Для текущего аккаунта включено зашифрованное хранение данных."),
+                font=(self.FONT_NAME, 11),
+                text_color=self.LABEL_FG,
+                anchor="w",
+                justify="left",
+                wraplength=760,
+            ).pack(fill="x", padx=4, pady=(0, 12))
+
+            btns = ctk.CTkFrame(auth_wrap, fg_color="transparent")
+            btns.pack(fill="x", padx=0, pady=(0, 2))
+            btns.grid_columnconfigure(0, weight=1, uniform="auth")
+            btns.grid_columnconfigure(1, weight=1, uniform="auth")
+
+            self.mk_btn(
+                btns,
+                text=self.tr("menu.profile", "Профиль"),
+                cmd=self.show_profile,
+                kind="secondary",
+                height=36,
+            ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+            self.mk_btn(
+                btns,
+                text=self.tr("menu.sign_out", "Выйти"),
+                cmd=self._menu_sign_out,
+                kind="primary",
+                height=36,
+            ).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        else:
+            header = ctk.CTkFrame(auth_wrap, fg_color="transparent")
+            header.pack(fill="x", padx=0, pady=(0, 8))
+            header.grid_columnconfigure(0, weight=1)
+            header.grid_columnconfigure(1, weight=0)
+            header.grid_columnconfigure(2, weight=0)
+
+            ctk.CTkLabel(
+                header,
+                text=self.tr("auth.panel_title", "Аккаунт"),
+                font=(self.FONT_NAME, 16, "bold"),
+                text_color=self.FG,
+            ).grid(row=0, column=0, sticky="w", padx=(0, 8))
+
+            self.mk_btn(
+                header,
+                text=self.tr("menu.sign_in", "Войти"),
+                cmd=lambda: self._set_home_auth_mode("signin", focus=True),
+                kind="primary" if self._home_auth_mode != "signup" else "secondary",
+                height=30,
+                width=110,
+            ).grid(row=0, column=1, padx=4, sticky="e")
+
+            self.mk_btn(
+                header,
+                text=self.tr("menu.sign_up", "Зарегистрироваться"),
+                cmd=lambda: self._set_home_auth_mode("signup", focus=True),
+                kind="primary" if self._home_auth_mode == "signup" else "secondary",
+                height=30,
+                width=110,
+            ).grid(row=0, column=2, padx=(4, 0), sticky="e")
+
+            body = ctk.CTkFrame(auth_wrap, fg_color="transparent")
+            body.pack(fill="x", padx=0, pady=(0, 0))
+            body.grid_columnconfigure(0, weight=1)
+
+            mode_is_signup = self._home_auth_mode == "signup"
+            action_label = self.tr("menu.sign_up", "Зарегистрироваться") if mode_is_signup else self.tr("menu.sign_in", "Войти")
+
+            ctk.CTkLabel(
+                body,
+                text=self.tr("auth.username_label", "Имя пользователя"),
+                text_color=self.FG,
+                anchor="w",
+            ).grid(row=0, column=0, sticky="w", pady=(0, 4))
+            self.auth_username_entry = ctk.CTkEntry(
+                body,
+                height=36,
+                fg_color=self.BTN,
+                text_color=self.FG,
+                corner_radius=10,
+                placeholder_text=self.tr("auth.username_placeholder", "Введите имя пользователя"),
+            )
+            self.auth_username_entry.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+            if self._auth_username_value:
+                try:
+                    self.auth_username_entry.insert(0, self._auth_username_value)
+                except Exception:
+                    pass
+
+            ctk.CTkLabel(
+                body,
+                text=self.tr("auth.password_label", "Пароль"),
+                text_color=self.FG,
+                anchor="w",
+            ).grid(row=2, column=0, sticky="w", pady=(0, 4))
+            self.auth_password_entry = ctk.CTkEntry(
+                body,
+                height=36,
+                fg_color=self.BTN,
+                text_color=self.FG,
+                corner_radius=10,
+                placeholder_text=self.tr("auth.password_placeholder", "Введите пароль"),
+                show="*",
+            )
+            self.auth_password_entry.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+
+            submit_row = 4
+            if mode_is_signup:
+                ctk.CTkLabel(
+                    body,
+                    text=self.tr("auth.confirm_password_label", "Подтвердите пароль"),
+                    text_color=self.FG,
+                    anchor="w",
+                ).grid(row=4, column=0, sticky="w", pady=(0, 4))
+                self.auth_confirm_entry = ctk.CTkEntry(
+                    body,
+                    height=36,
+                    fg_color=self.BTN,
+                    text_color=self.FG,
+                    corner_radius=10,
+                    placeholder_text=self.tr("auth.confirm_password_placeholder", "Повторите пароль"),
+                    show="*",
+                )
+                self.auth_confirm_entry.grid(row=5, column=0, sticky="ew", pady=(0, 10))
+                submit_row = 6
+
+            self.auth_username_entry.bind("<Return>", lambda e: self.auth_password_entry.focus_set() if self.auth_password_entry is not None else self._submit_home_auth())
+            self.auth_password_entry.bind("<Return>", lambda e: self._submit_home_auth())
+            if self.auth_confirm_entry is not None:
+                self.auth_confirm_entry.bind("<Return>", lambda e: self._submit_home_auth())
+
+            self.mk_btn(
+                body,
+                text=action_label,
+                cmd=self._submit_home_auth,
+                kind="primary",
+                height=36,
+            ).grid(row=submit_row, column=0, sticky="ew", pady=(2, 8))
+
+            hint_parts = [self.tr("auth.inline_hint", "Профиль и дневник хранятся в отдельных зашифрованных файлах для каждого аккаунта.")]
+            try:
+                if (not self.auth.has_any_user()) and self.auth.legacy_plaintext_exists(self._legacy_profile_path(), self._legacy_diary_path()):
+                    hint_parts.append(self.tr("auth.legacy_found_hint", "Найдены старые незашифрованные данные. Создайте первый аккаунт, чтобы перенести их в зашифрованное хранилище."))
+            except Exception:
+                pass
+
+            if self.opt_add_labels.get():
+                ctk.CTkLabel(
+                    body,
+                    text="\n".join(hint_parts),
+                    font=(self.FONT_NAME, 11),
+                    text_color=self.LABEL_FG,
+                    wraplength=760,
+                    justify="left",
+                    anchor="w",
+                ).grid(row=submit_row + 1, column=0, sticky="w", pady=(0, 2))
+
+            self.after(80, self._focus_auth_input)
+
+        divider_color = getattr(self.theme, "BORDER", None) or self.ACTIVE_BG or self.PANEL
+        divider = ctk.CTkFrame(parent, fg_color=divider_color, corner_radius=0, height=1)
+        divider.pack(padx=20, pady=(2, 12), fill="x")
 
 
 

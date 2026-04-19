@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from collections import deque
 import numpy as np
 import sys
+import os
 
 from options.config import settings
 
@@ -66,10 +67,13 @@ class SaluteSpeech:
         # print(f'token data = {answer}')
         return answer
 
-    def get_audio_from_text(self, text, format='pcm16', voice='May_24000', lang='ru'):
+    def get_audio_from_text(self, text, format='pcm16', voice='May_24000', lang='ru', text_clean=True):
         """
         Для проигрываетля нужен pcm16, для сохранения как файл лучше opus
         """
+        # Небольшая очистка текста, для лучшего произнесения.
+        if text_clean == True and isinstance(text, str):
+            text=text.replace('*', '')
         url = f"{self.SALUTE_SYNTHESIZE_URL}?format={format}&voice={voice}"
         if lang:
             c_type = 'application/ssml'
@@ -91,9 +95,9 @@ class SaluteSpeech:
         audio_data = response.content
         return audio_data
 
-    def get_text_from_audio(self, file: str, c_type='audio/mpeg'):
+    def get_text_from_audio(self, file: str, c_type='audio/mpeg', query_param='') -> list:
 
-        url = f"{self.SALUTE_RECOGNIZE_URL}"
+        url = f"{self.SALUTE_RECOGNIZE_URL}{query_param}"
 
         with open(file, "rb") as f:
             payload = f.read()
@@ -105,7 +109,14 @@ class SaluteSpeech:
 
         response = self.client.request("POST", url, headers=headers, data=payload)
 
-        text_data = response.content
+        if response.status_code == 200:
+            dict_data = response.json()
+            text_data = dict_data.get('result', [])
+            if isinstance(text_data, list) and text_data:
+                text_data = list(filter(None, text_data))
+        else:
+            text_data = []
+
         return text_data
 
     def get_audio_from_text0(self, text, voice='Ost_24000', format='oggopus'):
@@ -242,7 +253,7 @@ class SpeechPlayer(Thread):
                     break
 
                 if not isinstance(pkt, AudioPacket):
-                    raise TypeError("q_speech должен содержать AudioPacket (или None для окончания обработки)")
+                    raise TypeError("q_speech должен содержать AudioPacket (или None для завершения обработки)")
 
                 if pkt.fmt == "pcm16":
                     self._append_pcm(pkt.data, pkt.sample_rate, pkt.channels)
@@ -418,8 +429,100 @@ class TTS_Stream(Thread):
                 with open(f"out__{count}.{ext}", "wb") as f:
                     f.write(audio_data)
 
+@dataclass
+class ASRJob:
+    """Задание на распознавание речи."""
+    file: str
+    # c_type: str = "audio/wav"
+    c_type: str = "audio/x-pcm;bit=16;rate=16000"
+    query_param: str = "?language=ru-RU&sample_rate=16000&channels_count=1"
+    cleanup: bool = True
+
+
+@dataclass
+class ASRResult:
+    """Результат распознавания речи."""
+    texts: list[str]
+    job: ASRJob
+    error: str | None = None
+
+
+class ASR_Stream(Thread):
+    """Фоновый worker: берёт ASRJob из q_in, кладёт ASRResult в q_out."""
+
+    def __init__(self, q_in: Queue, q_out: Queue, daemon: bool = True, finished_item: bool = False):
+        super().__init__(daemon=daemon)
+        self.q_in = q_in
+        self.q_out = q_out
+        self.finished_item = finished_item
+        self._buffer_lock = threading.Lock()
+
+    def _clean_queue(self):
+        while True:
+            try:
+                self.q_in.get_nowait()
+            except Empty:
+                break
+
+    def stop_queue(self):
+        # очистить очередь ожидания распознавания
+        self._clean_queue()
+
+    def run(self):
+        salut_engine = None
+        try:
+            salut_engine = SaluteSpeech()
+        except Exception as e:
+            # Если не получилось создать движок — дальше смысла нет.
+            self.q_out.put(ASRResult(texts=[], job=ASRJob(file=""), error=repr(e)))
+            return
+
+        while True:
+            with self._buffer_lock:
+                job = self.q_in.get()
+
+            if job is None:
+                if self.finished_item:
+                    self.q_out.put(None)
+                    break
+                continue
+
+            # Позволяем короткий формат: просто путь к файлу
+            if isinstance(job, str):
+                job = ASRJob(file=job)
+
+            if not isinstance(job, ASRJob):
+                self.q_out.put(ASRResult(texts=[], job=ASRJob(file=""), error="ASR_Stream: unsupported job type"))
+                continue
+
+            try:
+                texts = salut_engine.get_text_from_audio(job.file, c_type=job.c_type, query_param=job.query_param)
+                res = ASRResult(texts=texts or [], job=job, error=None)
+            except Exception as e:
+                res = ASRResult(texts=[], job=job, error=repr(e))
+            finally:
+                if job.cleanup:
+                    try:
+                        os.remove(job.file)
+                    except Exception:
+                        pass
+
+            self.q_out.put(res)
+
+
+
+
 
 if __name__ == "__main__":
+
+    # Проверка ASR
+    salut_engine = SaluteSpeech()
+    text_data = salut_engine.get_text_from_audio('left_mono.wav', c_type='audio/x-pcm;bit=16;rate=8000', query_param='?language=ru-RU&sample_rate=8000&channels_count=1')
+    print(text_data)
+
+    sys.exit()
+
+    # Проверка TTS
     q_text = Queue()
     q_speech = Queue()
 

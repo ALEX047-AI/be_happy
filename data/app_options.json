@@ -1,8 +1,10 @@
 {
   "USE_TTS": true,
   "TTS_VOICE": "Кира",
-  "THEME": "Светлая",
+  "THEME": "Тёмная",
   "LANG_UI": "en",
   "LANG_CHAT": "en",
-  "LANG_CONTENT": "en"
+  "LANG_CONTENT": "en",
+  "POP_MSG_ON": false,
+  "ADD_LABELS": false
 }

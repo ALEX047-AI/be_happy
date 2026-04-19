@@ -4,14 +4,19 @@ try:
     import customtkinter as ctk
 except Exception as _e:
     raise ImportError(
-        "customtkinter is required for this version. Install it with: pip install customtkinter"
+        "Необходим пакет customtkinter. Установите его командой: pip install customtkinter"
     ) from _e
 from datetime import datetime, date, time, timedelta
+import os
 
 import matplotlib.dates as mdates
 from matplotlib.ticker import FuncFormatter
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+try:
+    from PIL import Image
+except Exception:
+    Image = None
 
 
 class DiaryView:
@@ -64,8 +69,268 @@ class DiaryView:
         self.SLIDER_BUTTON = getattr(theme, "SLIDER_BUTTON", None) or self.ACCENT
 
         self.selected_day = date.today()
+        self._calendar_icon = None
 
         self._build()
+
+    def _resolve_png_dir(self):
+        base_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+        candidates = [
+            os.path.join(base_dir, "data", "png"),
+            os.path.join(base_dir, "..", "data", "png"),
+            os.path.join(os.getcwd(), "data", "png"),
+        ]
+        for folder in candidates:
+            folder = os.path.abspath(folder)
+            if os.path.isdir(folder):
+                return folder
+        return None
+
+    def _load_ctk_png(self, *filenames, size=(18, 18)):
+        if Image is None:
+            return None
+        png_dir = self._resolve_png_dir()
+        if not png_dir:
+            return None
+        for filename in filenames:
+            path = os.path.join(png_dir, filename)
+            if os.path.exists(path):
+                try:
+                    img = Image.open(path)
+                    return ctk.CTkImage(light_image=img, dark_image=img, size=size)
+                except Exception:
+                    continue
+        return None
+
+    @staticmethod
+    def _clamp_int(v: float, lo: int = 0, hi: int = 255) -> int:
+        try:
+            iv = int(round(float(v)))
+        except Exception:
+            iv = 0
+        return max(lo, min(hi, iv))
+
+    @classmethod
+    def _hex_to_rgb(cls, color: str):
+        if not isinstance(color, str):
+            return None
+        c = color.strip()
+        if not c:
+            return None
+        if c.startswith("#"):
+            c = c[1:]
+        if len(c) != 6:
+            return None
+        try:
+            return (int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _rgb_to_hex(rgb) -> str:
+        try:
+            r, g, b = rgb
+            return "#{:02X}{:02X}{:02X}".format(int(r), int(g), int(b))
+        except Exception:
+            return "#000000"
+
+    @classmethod
+    def _mix_hex(cls, c1: str, c2: str, t: float) -> str:
+        a = cls._hex_to_rgb(c1)
+        b = cls._hex_to_rgb(c2)
+        if a is None or b is None:
+            return c1
+        t = max(0.0, min(1.0, float(t)))
+        r = cls._clamp_int(a[0] + (b[0] - a[0]) * t)
+        g = cls._clamp_int(a[1] + (b[1] - a[1]) * t)
+        b2 = cls._clamp_int(a[2] + (b[2] - a[2]) * t)
+        return cls._rgb_to_hex((r, g, b2))
+
+    def _rel_lum(self, c: str) -> float | None:
+        rgb = self._hex_to_rgb(c)
+        if rgb is None:
+            return None
+        def _to_lin(v: int) -> float:
+            x = v / 255.0
+            return x / 12.92 if x <= 0.04045 else ((x + 0.055) / 1.055) ** 2.4
+        r, g, b = rgb
+        rl, gl, bl = _to_lin(r), _to_lin(g), _to_lin(b)
+        return 0.2126 * rl + 0.7152 * gl + 0.0722 * bl
+
+    def _contrast_ratio(self, bg: str, fg: str) -> float | None:
+        lb = self._rel_lum(bg)
+        lf = self._rel_lum(fg)
+        if lb is None or lf is None:
+            return None
+        L1, L2 = (lb, lf) if lb >= lf else (lf, lb)
+        return (L1 + 0.05) / (L2 + 0.05)
+
+    def _best_contrast(self, bg: str, c1: str, c2: str) -> str:
+        r1 = self._contrast_ratio(bg, c1) or 0.0
+        r2 = self._contrast_ratio(bg, c2) or 0.0
+        return c1 if r1 >= r2 else c2
+
+    @staticmethod
+    def _is_descendant(widget, ancestor) -> bool:
+        try:
+            w = widget
+            while w is not None:
+                if w == ancestor:
+                    return True
+                w = w.master
+        except Exception:
+            pass
+        return False
+
+    def _pointer_inside(self, widget, x_root: int, y_root: int) -> bool:
+        try:
+            w = widget.winfo_containing(x_root, y_root)
+            return self._is_descendant(w, widget)
+        except Exception:
+            return False
+
+    def _bind_ctk_widget_recursively(self, widget, sequence: str, func) -> None:
+        targets = [widget]
+        for attr in ("_canvas", "_text_label", "_image_label"):
+            try:
+                w = getattr(widget, attr, None)
+                if w is not None:
+                    targets.append(w)
+            except Exception:
+                pass
+        try:
+            for ch in widget.winfo_children():
+                if ch not in targets:
+                    targets.append(ch)
+        except Exception:
+            pass
+        for w in targets:
+            try:
+                w.bind(sequence, func, add="+")
+            except Exception:
+                pass
+
+    def _btn_palette(self, kind: str = "secondary") -> dict:
+        kind = (kind or "secondary").lower()
+        def _text_for(bg_hex: str) -> str:
+            return self._best_contrast(bg_hex, self.FG, self.BG)
+        if kind in ("primary", "accent"):
+            text = _text_for(self.ACCENT)
+            hover = self._mix_hex(self.ACCENT, text, 0.12)
+            pressed = self._mix_hex(self.ACCENT, text, 0.22)
+            return {"fg": self.ACCENT, "hover": hover, "pressed": pressed, "text": text}
+        text = _text_for(self.BTN)
+        hover = self.ACTIVE_BG
+        try:
+            same_hover = str(hover).strip().lower() == str(self.BTN).strip().lower()
+        except Exception:
+            same_hover = False
+        if same_hover:
+            hover = self._mix_hex(self.BTN, text, 0.10)
+        pressed = self._mix_hex(hover, text, 0.18)
+        return {"fg": self.BTN, "hover": hover, "pressed": pressed, "text": text}
+
+    def _apply_ctk_button_effects(self, btn, kind: str = "secondary") -> None:
+        pal = self._btn_palette(kind)
+        try:
+            btn.configure(fg_color=pal["fg"], hover_color=pal["hover"], text_color=pal["text"])
+        except Exception:
+            return
+        normal, hover, pressed = pal["fg"], pal["hover"], pal["pressed"]
+
+        def _is_disabled() -> bool:
+            try:
+                return str(btn.cget("state")).lower() == "disabled"
+            except Exception:
+                return False
+
+        def on_press(_event):
+            if _is_disabled():
+                return
+            try:
+                btn.configure(fg_color=pressed)
+            except Exception:
+                pass
+
+        def on_release(event):
+            if _is_disabled():
+                return
+            inside = self._pointer_inside(btn, getattr(event, "x_root", 0), getattr(event, "y_root", 0))
+            try:
+                btn.configure(fg_color=(hover if inside else normal))
+            except Exception:
+                pass
+
+        def on_leave(_event):
+            if _is_disabled():
+                return
+            try:
+                btn.configure(fg_color=normal)
+            except Exception:
+                pass
+
+        try:
+            self._bind_ctk_widget_recursively(btn, "<ButtonPress-1>", on_press)
+            self._bind_ctk_widget_recursively(btn, "<ButtonRelease-1>", on_release)
+            self._bind_ctk_widget_recursively(btn, "<Leave>", on_leave)
+        except Exception:
+            pass
+
+    def _apply_ctk_slider_effects(self, slider) -> None:
+        base_button = self.SLIDER_BUTTON
+        btn_text = self._best_contrast(base_button, self.FG, self.BG)
+        hover_button = self._mix_hex(base_button, btn_text, 0.12)
+        pressed_button = self._mix_hex(base_button, btn_text, 0.22)
+        try:
+            slider.configure(
+                fg_color=self.SLIDER_FG,
+                progress_color=self.SLIDER_PROGRESS,
+                button_color=base_button,
+                button_hover_color=hover_button,
+            )
+        except Exception:
+            return
+
+        def on_enter(_event):
+            try:
+                slider.configure(button_color=hover_button)
+            except Exception:
+                pass
+
+        def on_leave(_event):
+            try:
+                slider.configure(button_color=base_button)
+            except Exception:
+                pass
+
+        def on_press(_event):
+            try:
+                slider.configure(button_color=pressed_button)
+            except Exception:
+                pass
+
+        def on_release(event):
+            inside = self._pointer_inside(slider, getattr(event, "x_root", 0), getattr(event, "y_root", 0))
+            try:
+                slider.configure(button_color=(hover_button if inside else base_button))
+            except Exception:
+                pass
+
+        try:
+            self._bind_ctk_widget_recursively(slider, "<Enter>", on_enter)
+            self._bind_ctk_widget_recursively(slider, "<Leave>", on_leave)
+            self._bind_ctk_widget_recursively(slider, "<ButtonPress-1>", on_press)
+            self._bind_ctk_widget_recursively(slider, "<ButtonRelease-1>", on_release)
+        except Exception:
+            pass
+
+    def mk_btn(self, parent, text: str, cmd, *, kind: str = "secondary", **kwargs):
+        kw = dict(master=parent, text=text, command=cmd)
+        kw.update(kwargs)
+        kw.setdefault("corner_radius", 10)
+        btn = ctk.CTkButton(**kw)
+        self._apply_ctk_button_effects(btn, kind=kind)
+        return btn
 
     def _build(self):
         f = self.parent
@@ -106,29 +371,23 @@ class DiaryView:
         day_ctrl = ctk.CTkFrame(header_row, fg_color="transparent")
         day_ctrl.pack(side="right")
 
-        self.prev_day_btn = ctk.CTkButton(
+        self.prev_day_btn = self.mk_btn(
             day_ctrl,
-            text="◀",
+            text="<<",
+            cmd=self.goto_prev_day,
+            kind="primary",
             width=44,
             height=32,
-            corner_radius=10,
-            fg_color=self.ACCENT,
-            hover_color=self.ACCENT,
-            text_color="white",
-            command=self.goto_prev_day,
         )
         self.prev_day_btn.pack(side="left", padx=(0, 8))
 
-        self.today_btn = ctk.CTkButton(
+        self.today_btn = self.mk_btn(
             day_ctrl,
             text=self.tr("diary.today", "Сегодня"),
+            cmd=self.goto_today,
+            kind="secondary",
             width=110,
             height=32,
-            corner_radius=10,
-            fg_color=self.BTN,
-            hover_color=self.ACTIVE_BG,
-            text_color=self.FG,
-            command=self.goto_today,
         )
         self.today_btn.pack(side="left", padx=(0, 8))
 
@@ -138,32 +397,30 @@ class DiaryView:
             try:
                 self.calendar_func(title=self.tr("diary.pick_date", "Выбор даты"), year_max_shift=0, current=self.selected_day, callback=on_pick)
             except TypeError:
-                # if calendar_func has old signature
+                # если calendar_func имеет старый сигнатуру
                 self.calendar_func(callback=on_pick)
 
-        self.calendar_btn = ctk.CTkButton(
+        self._calendar_icon = self._load_ctk_png("calendar.png", "calendar(1).png", size=(18, 18))
+        self.calendar_btn = self.mk_btn(
             day_ctrl,
-            text="📅",
+            text=self._format_day(self.selected_day),
+            cmd=pick_date,
+            kind="secondary",
+            image=self._calendar_icon,
+            compound="left",
+            anchor="center",
             width=160,
             height=32,
-            corner_radius=10,
-            fg_color=self.BTN,
-            hover_color=self.ACTIVE_BG,
-            text_color=self.FG,
-            command=pick_date,
         )
         self.calendar_btn.pack(side="left", padx=(0, 8))
 
-        self.next_day_btn = ctk.CTkButton(
+        self.next_day_btn = self.mk_btn(
             day_ctrl,
-            text="▶",
+            text=">>",
+            cmd=self.goto_next_day,
+            kind="primary",
             width=44,
             height=32,
-            corner_radius=10,
-            fg_color=self.ACCENT,
-            hover_color=self.ACCENT,
-            text_color="white",
-            command=self.goto_next_day,
         )
         self.next_day_btn.pack(side="left")
 
@@ -232,6 +489,10 @@ class DiaryView:
             self.mood_slider.set(self.diary_mood.get())
         except Exception:
             pass
+        try:
+            self._apply_ctk_slider_effects(self.mood_slider)
+        except Exception:
+            pass
 
         ctk.CTkLabel(mood_row, textvariable=self.diary_mood, text_color=self.FG, width=32).pack(side="left")
 
@@ -245,15 +506,12 @@ class DiaryView:
         )
         self.comment_box.pack(fill="x", padx=12, pady=(4, 10)) """
 
-        ctk.CTkButton(
+        self.mk_btn(
             f,
             text=self.tr("diary.save", "Сохранить"),
-            fg_color=self.ACCENT,
-            hover_color=self.ACCENT,
-            text_color="white",
-            corner_radius=10,
+            cmd=self.save_entry,
+            kind="primary",
             height=36,
-            command=self.save_entry,
         ).pack(pady=(0, 8))
 
         # Схема
