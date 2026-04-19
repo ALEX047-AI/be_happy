@@ -147,7 +147,7 @@ class Settings(BaseSettings):
     # OPENROUTER_MODEL: str = "mistralai/mistral-small-3.2-24b-instruct:free"
     #   model="mistralai/mistral-7b-instruct:free"
 
-    GIGACHAT_CREDENTIALS: str = "MDE5ZDgzMWItNTVmYy03YmFmLTgyNjgtYjViMGJjZDg4NWM5OjczNTZmODc4LTMyZDctNDQ2Yi1iN2I2LTQ1ZjQ4ZDY3NTJlYQ=="
+    GIGACHAT_CREDENTIALS: str = ""
     GIGACHAT_MODEL: str = 'GigaChat-2-Max'
     GIGACHAT_BASE_URL: str = "https://gigachat.devices.sberbank.ru/api/v1"
 
